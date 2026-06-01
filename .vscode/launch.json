@@ -1,0 +1,42 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "surya-api.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "surya-api.py",
+            "console": "integratedTerminal",
+            "env": {
+                "PATH": "/home/al/local/AI-tools/surya-api/.venv/bin:$PATH",
+                "LD_LIBRARY_PATH": "/usr/local/lib",
+                "SURYA_INFERENCE_BACKEND": "llamacpp",
+                "SURYA_INFERENCE_CTX_SIZE": "262144",
+                "SURYA_INFERENCE_PARALLEL": "5",
+                // "SURYA_MAX_TOKENS_FULL_PAGE": "262144",
+                // "SURYA_INFERENCE_CTX_PER_SLOT": "262144",
+                "LLAMA_CPP_NGL": "999"
+            },
+        },
+        {
+            "name": "surya-gui",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "surya-gui",
+            "console": "integratedTerminal",
+            "env": {
+                "PATH": "/home/al/local/AI-tools/surya-api/.venv/bin:$PATH",
+                "LD_LIBRARY_PATH": "/usr/local/lib",
+                "SURYA_INFERENCE_BACKEND": "llamacpp",
+                "SURYA_INFERENCE_CTX_SIZE": "100000",
+                "SURYA_INFERENCE_PARALLEL": "2",
+                "SURYA_INFERENCE_CTX_PER_SLOT": "50000",
+                "LLAMA_CPP_NGL": "-1"
+            },
+            "args": ["--remote-debug", "--port", "8521"]
+        }
+    ]
+}
