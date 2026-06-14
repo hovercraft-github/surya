@@ -1,4 +1,6 @@
 from math import sqrt
+import io
+import os
 import numpy as np
 
 
@@ -8,6 +10,7 @@ from surya.settings import settings
 import pypdfium2
 from PIL import Image
 from fastapi import UploadFile
+from concurrent.futures import ProcessPoolExecutor
 
 
 def get_page_image(
@@ -79,6 +82,19 @@ def entropy(values):
     return -np.sum(probs * np.log2(probs))
 
 
+def _entropy_from_chunks(image_bytes: bytes, chunk_boxes: list[tuple[int, int, int, int]]) -> list[float]:
+    """
+    Top-level helper for use with ProcessPoolExecutor (must be picklable).
+
+    Reconstructs the image from a PNG bytes buffer once and computes the entropy
+    of each chunk defined by ``chunk_boxes`` (left, top, right, bottom).
+
+    Returns a list of entropy values, one per chunk box, in the same order.
+    """
+    img = Image.open(io.BytesIO(image_bytes))
+    return [entropy(img.crop(box).getdata()) for box in chunk_boxes]
+
+
 def trim_white_background(image: Image.Image, threshold: int | None = None) -> Image.Image:
 
     gray = image.convert("L")
@@ -116,36 +132,36 @@ def trim_white_background(image: Image.Image, threshold: int | None = None) -> I
     crop_right = w
     n_removed = 0
     for y in range(0, h, h_step):
-        chank = inverse.crop((0, y, w, min(y + h_step, h)))
-        chank_points = image_white_cnt_points(chank, white_threshold=threshold)
-        n_removed += chank_points
+        chunk = inverse.crop((0, y, w, min(y + h_step, h)))
+        chunk_points = image_white_cnt_points(chunk, white_threshold=threshold)
+        n_removed += chunk_points
         if n_removed / n_points_total < 0.01:
             crop_top = y + h_step
         else:
             break
     n_removed = 0
     for y in range(h, 0, -h_step):
-        chank = inverse.crop((0, max(y - h_step, 0), w, y))
-        chank_points = image_white_cnt_points(chank, white_threshold=threshold)
-        n_removed += chank_points
+        chunk = inverse.crop((0, max(y - h_step, 0), w, y))
+        chunk_points = image_white_cnt_points(chunk, white_threshold=threshold)
+        n_removed += chunk_points
         if n_removed / n_points_total < 0.01:
             crop_bottom = y - h_step
         else:
             break
     n_removed = 0
     for x in range(0, w, w_step):
-        chank = inverse.crop((x, 0, min(x + w_step, w), h))
-        chank_points = image_white_cnt_points(chank, white_threshold=threshold)
-        n_removed += chank_points
+        chunk = inverse.crop((x, 0, min(x + w_step, w), h))
+        chunk_points = image_white_cnt_points(chunk, white_threshold=threshold)
+        n_removed += chunk_points
         if n_removed / n_points_total < 0.01:
             crop_left = x + w_step
         else:
             break
     n_removed = 0
     for x in range(w, 0, -w_step):
-        chank = inverse.crop((max(x - w_step, 0), 0, x, h))
-        chank_points = image_white_cnt_points(chank, white_threshold=threshold)
-        n_removed += chank_points
+        chunk = inverse.crop((max(x - w_step, 0), 0, x, h))
+        chunk_points = image_white_cnt_points(chunk, white_threshold=threshold)
+        n_removed += chunk_points
         if n_removed / n_points_total < 0.01:
             crop_right = x - w_step
         else:
@@ -171,27 +187,70 @@ def color_distance(pixel, bg, color_space='sRGB'):
         return cdist/norm
     return 0.0
 
-def stripe_entropy(image: Image.Image, aggressive: bool = False) -> float:
+def _split_round_robin(items, n_slices):
+    """Split ``items`` into ``n_slices`` lists using round-robin assignment."""
+    n_slices = max(1, n_slices)
+    slices: list[list] = [[] for _ in range(n_slices)]
+    for idx, item in enumerate(items):
+        slices[idx % n_slices].append(item)
+    return slices
+
+
+def stripe_entropy(
+    image: Image.Image,
+    aggressive: bool = False,
+    executor: ProcessPoolExecutor | None = None,
+) -> float:
 
     if aggressive:
         return entropy(image.getdata())
-    w,h = image.size
-    entropies = []
+    w, h = image.size
+    # Compute chunk boundary boxes (left, top, right, bottom) for each stripe.
+    chunk_boxes: list[tuple[int, int, int, int]] = []
     if h > w:
         h_step = w
         for y in range(0, h, h_step):
-            chank = image.crop((0, y, w, min(y + h_step, h)))
-            entropies.append(entropy(chank.getdata()))
+            chunk_boxes.append((0, y, w, min(y + h_step, h)))
     else:
         w_step = h
         for x in range(0, w, w_step):
-            chank = image.crop((x, 0, min(x + w_step, w), h))
-            entropies.append(entropy(chank.getdata()))
+            chunk_boxes.append((x, 0, min(x + w_step, w), h))
+    if not chunk_boxes:
+        return 1.0
+    # Serialize the entire image to a PNG bytes buffer once so workers can
+    # reconstruct it independently without re-pickling per-stripe pixel data.
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    image_bytes = buf.getvalue()
+    # Split the boxes across workers; each worker decodes ``image_bytes`` once
+    # and computes entropy for its assigned subset of chunk boxes.
+    n_slices = min(len(chunk_boxes), (os.cpu_count() or 1))
+    splits = _split_round_robin(chunk_boxes, n_slices)
+    # Use the caller-provided pool if given; otherwise spin up a transient one
+    # so the function remains safe to call without external setup.
+    owns_pool = executor is None
+    pool = executor if executor is not None else ProcessPoolExecutor()
+    try:
+        per_worker_results = list(pool.map(
+            _entropy_from_chunks,
+            [image_bytes] * len(splits),
+            splits,
+        ))
+    finally:
+        if owns_pool:
+            pool.shutdown()
+    entropies: list[float] = []
+    for result in per_worker_results:
+        entropies.extend(result)
     return max(entropies)
 
-def trim_empty_background(image: Image.Image, threshold: float = 0.5) -> Image.Image:
+def trim_empty_background(
+    image: Image.Image,
+    threshold: float = 0.5,
+    executor: ProcessPoolExecutor | None = None,
+) -> Image.Image:
 
-    w,h = image.size
+    w, h = image.size
     h_step = max(1, h // 40)
     w_step = max(1, w // 40)
     crop_top = 0
@@ -199,34 +258,43 @@ def trim_empty_background(image: Image.Image, threshold: float = 0.5) -> Image.I
     crop_bottom = h
     crop_right = w
     pal_image = image.convert("P", palette=Image.Palette.ADAPTIVE, colors=256)
-    for y in range(0, h, h_step):
-        stripe = pal_image.crop((0, y, w, min(y + h_step, h)))
-        stripe_ent = stripe_entropy(stripe)
-        if stripe_ent < threshold:
-            crop_top = y + h_step
-        else:
-            break
-    for y in range(h, 0, -h_step):
-        stripe = pal_image.crop((0, max(y - h_step, 0), w, y))
-        stripe_ent = stripe_entropy(stripe)
-        if stripe_ent < threshold:
-            crop_bottom = y - h_step
-        else:
-            break
-    for x in range(0, w, w_step):
-        stripe = pal_image.crop((x, 0, min(x + w_step, w), h))
-        stripe_ent = stripe_entropy(stripe)
-        if stripe_ent < threshold:
-            crop_left = x + w_step
-        else:
-            break
-    for x in range(w, 0, -w_step):
-        stripe = pal_image.crop((max(x - w_step, 0), 0, x, h))
-        stripe_ent = stripe_entropy(stripe)
-        if stripe_ent < threshold:
-            crop_right = x - w_step
-        else:
-            break
+    # Share a single ProcessPoolExecutor across all four stripe scans so the
+    # worker pool is created/used at most once per call (or reused entirely
+    # if the caller passed one in).
+    owns_pool = executor is None
+    pool = executor if executor is not None else ProcessPoolExecutor()
+    try:
+        for y in range(0, h, h_step):
+            stripe = pal_image.crop((0, y, w, min(y + h_step, h)))
+            stripe_ent = stripe_entropy(stripe, executor=pool)
+            if stripe_ent < threshold:
+                crop_top = y + h_step
+            else:
+                break
+        for y in range(h, 0, -h_step):
+            stripe = pal_image.crop((0, max(y - h_step, 0), w, y))
+            stripe_ent = stripe_entropy(stripe, executor=pool)
+            if stripe_ent < threshold:
+                crop_bottom = y - h_step
+            else:
+                break
+        for x in range(0, w, w_step):
+            stripe = pal_image.crop((x, 0, min(x + w_step, w), h))
+            stripe_ent = stripe_entropy(stripe, executor=pool)
+            if stripe_ent < threshold:
+                crop_left = x + w_step
+            else:
+                break
+        for x in range(w, 0, -w_step):
+            stripe = pal_image.crop((max(x - w_step, 0), 0, x, h))
+            stripe_ent = stripe_entropy(stripe, executor=pool)
+            if stripe_ent < threshold:
+                crop_right = x - w_step
+            else:
+                break
+    finally:
+        if owns_pool:
+            pool.shutdown()
 
     if crop_left >= crop_right or crop_top >= crop_bottom:
         return image
