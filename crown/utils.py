@@ -75,6 +75,36 @@ def crop_by_percent(image: Image.Image, crop_percent: float) -> Image.Image:
         return cropped_image
     return image
 
+
+def crop_by_side_percent(
+    image: Image.Image,
+    left: float = 0.0,
+    right: float = 0.0,
+    top: float = 0.0,
+    bottom: float = 0.0,
+) -> Image.Image:
+    """Crops a percentage from each side of the image independently.
+
+    Each parameter is a percentage (0..50) of the image dimension
+    to crop from the corresponding side. 0 (or None) means no cropping
+    on that side. When the sum of horizontal/vertical crops would
+    cover the full image, the original image is returned.
+    """
+    left = max(0.0, float(left or 0.0))
+    right = max(0.0, float(right or 0.0))
+    top = max(0.0, float(top or 0.0))
+    bottom = max(0.0, float(bottom or 0.0))
+    if left == 0.0 and right == 0.0 and top == 0.0 and bottom == 0.0:
+        return image
+    w, h = image.size
+    crop_left = int(w * left / 100)
+    crop_right = w - int(w * right / 100)
+    crop_top = int(h * top / 100)
+    crop_bottom = h - int(h * bottom / 100)
+    if crop_left >= crop_right or crop_top >= crop_bottom:
+        return image
+    return image.crop((crop_left, crop_top, crop_right, crop_bottom))
+
 def entropy(values):
     values = np.asarray(values)
     _, counts = np.unique(values, return_counts=True)

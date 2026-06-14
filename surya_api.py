@@ -2,30 +2,22 @@
 # -*- coding: utf-8 -*-
 
 import fcntl
-from typing import Optional
 from filelock import FileLock, Timeout
 import logging.config
 import copy
 
 from fastapi import FastAPI, File, UploadFile, Query, Path, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import os
-import io
-# import pathlib
 import argparse
 from time import perf_counter
-from PIL import Image, ImageChops
+from PIL import Image
 
-# import pypdfium2
 import asyncio
 
-from pydantic import BaseModel
-
 from crown.table_rec import TableExtPredictor
-from crown.utils import crop_by_percent, get_page_image, trim_empty_background
+from crown.utils import crop_by_percent, crop_by_side_percent, get_page_image, trim_empty_background
 from crown.utils import poligon_expand
-from crown.utils import trim_white_background
 from surya.layout.schema import LayoutBox, LayoutResult
 from surya.recognition.schema import PageOCRResult
 from surya.settings import settings
@@ -202,6 +194,45 @@ async def lifespan(app: FastAPI):
     print("Done")
 
 
+def load_and_preprocess_image(
+    file: UploadFile,
+    dpi: int | None,
+    trim: float,
+    crop: float,
+    crop_left: float = 0.0,
+    crop_right: float = 0.0,
+    crop_top: float = 0.0,
+    crop_bottom: float = 0.0,
+) -> Image.Image:
+    """Load an uploaded file (PDF or image) into a PIL image and apply the
+    shared trim/crop preprocessing used by every OCR endpoint.
+
+    - PDF inputs are rendered at the given DPI to a single RGB image.
+    - Image inputs are decoded and converted to RGB.
+    - ``trim`` removes empty/solid borders by entropy threshold.
+    - ``crop_*`` crop a percentage off the corresponding side before OCR;
+      when any of the per-side values is non-zero, it is used; otherwise
+      the symmetric ``crop`` value is applied to all four sides.
+    """
+    if file.content_type == "application/pdf":
+        image = get_page_image(file, page_num=1, dpi=dpi or 300)
+    else:
+        image = Image.open(file.file).convert("RGB")
+    if trim > 0.0:
+        image = trim_empty_background(image, threshold=trim)
+    if crop_left or crop_right or crop_top or crop_bottom:
+        image = crop_by_side_percent(
+            image,
+            left=crop_left or crop,
+            right=crop_right or crop,
+            top=crop_top or crop,
+            bottom=crop_bottom or crop,
+        )
+    elif crop > 0.0:
+        image = crop_by_percent(image, crop)
+    return image
+
+
 # Initialize FastAPI
 app = FastAPI(lifespan=lifespan)
 
@@ -227,11 +258,41 @@ async def ocr_full_page(file: UploadFile = File(...),
         le=600,
         description="Optional: DPI for rendering PDF pages to images. Higher DPI can improve OCR accuracy but increases processing time and memory usage. 300 (the default) is a common choice for good quality OCR."
         ),
+    trim: float = Query(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Optional entropy threshold to detect and trim empty/solid fill background from each side of the image before OCR. Can help with empty borders that can provoke hallucinations. 0 means no trimming, 0.2 .. 0.5 recommended value, default is 0.5."
+        ),
     crop: float = Query(
         default=0.0,
         ge=0.0,
         le=50.0,
         description="Optional percent to crop from each side of the image before OCR. Can help with noisy borders that can provoke hallucinations. 0 means no cropping, 50 means crop half of the image from each side, 0.2 .. 0.5 recommended value."
+        ),
+    crop_left: float = Query(
+        default=0.0,
+        ge=0.0,
+        le=50.0,
+        description="Optional percent to crop from the LEFT side of the image before OCR. Overrides the 'crop' value for the left side. 0 means no cropping, 50 means crop half of the image width, 0.2 .. 0.5 recommended value."
+        ),
+    crop_right: float = Query(
+        default=0.0,
+        ge=0.0,
+        le=50.0,
+        description="Optional percent to crop from the RIGHT side of the image before OCR. Overrides the 'crop' value for the right side. 0 means no cropping, 50 means crop half of the image width, 0.2 .. 0.5 recommended value."
+        ),
+    crop_top: float = Query(
+        default=0.0,
+        ge=0.0,
+        le=50.0,
+        description="Optional percent to crop from the TOP side of the image before OCR. Overrides the 'crop' value for the top side. 0 means no cropping, 50 means crop half of the image height, 0.2 .. 0.5 recommended value."
+        ),
+    crop_bottom: float = Query(
+        default=0.0,
+        ge=0.0,
+        le=50.0,
+        description="Optional percent to crop from the BOTTOM side of the image before OCR. Overrides the 'crop' value for the bottom side. 0 means no cropping, 50 means crop half of the image height, 0.2 .. 0.5 recommended value."
         ),
     ):
     """Full-page OCR that extracts text and returns structured HTML.
@@ -255,18 +316,16 @@ async def ocr_full_page(file: UploadFile = File(...),
             inference_manager.start()
         update_request_count()
         start_time = perf_counter()
-        if file.content_type == "application/pdf":
-            # For PDFs, render the first page to an image for OCR
-            # pdf_path = pathlib.Path(f"/tmp/{file.filename}")
-            # with open(pdf_path, "wb") as f:
-            #     f.write(file.file.read())
-            image = get_page_image(file, page_num=1, dpi=dpi)
-            # os.remove(pdf_path)
-        else:
-            image = Image.open(file.file)
-        image = trim_empty_background(image)
-        if crop > 0.0:
-            image = crop_by_percent(image, crop)
+        image = load_and_preprocess_image(
+            file,
+            dpi=dpi,
+            trim=trim,
+            crop=crop,
+            crop_left=crop_left,
+            crop_right=crop_right,
+            crop_top=crop_top,
+            crop_bottom=crop_bottom,
+        )
         # Use full_page=True for direct HTML extraction with HIGH_ACCURACY_BBOX_PROMPT
         predictions = recognizer([image], full_page=True)
 
@@ -371,17 +430,42 @@ async def ocr_blocks(file: UploadFile = File(...),
         le=600,
         description="Optional: DPI for rendering PDF pages to images. Higher DPI can improve OCR accuracy but increases processing time and memory usage. 300 (the default) is a common choice for good quality OCR."
         ),
+    trim: float = Query(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Optional entropy threshold to detect and trim empty/solid fill background from each side of the image before OCR. Can help with empty borders that can provoke hallucinations. 0 means no trimming, 0.2 .. 0.5 recommended value, default is 0.5."
+        ),
     crop: float = Query(
         default=0.0,
         ge=0.0,
         le=50.0,
         description="Optional percent to crop from each side of the image before OCR. Can help with noisy borders that can provoke hallucinations. 0 means no cropping, 50 means crop half of the image from each side, 0.2 .. 0.5 recommended value."
         ),
-    # tblmode: str = Query(
-    #     default="td",
-    #     enum=["td", "div"],
-    #     description="Table recognition mode: 'td' for cell-level HTML using <td> and <tr> tags, 'div' for cell-level HTML with <div> and data-bbox attributes"
-    #     )
+    crop_left: float = Query(
+        default=0.0,
+        ge=0.0,
+        le=50.0,
+        description="Optional percent to crop from the LEFT side of the image before OCR. Overrides the 'crop' value for the left side. 0 means no cropping, 50 means crop half of the image width, 0.2 .. 0.5 recommended value."
+        ),
+    crop_right: float = Query(
+        default=0.0,
+        ge=0.0,
+        le=50.0,
+        description="Optional percent to crop from the RIGHT side of the image before OCR. Overrides the 'crop' value for the right side. 0 means no cropping, 50 means crop half of the image width, 0.2 .. 0.5 recommended value."
+        ),
+    crop_top: float = Query(
+        default=0.0,
+        ge=0.0,
+        le=50.0,
+        description="Optional percent to crop from the TOP side of the image before OCR. Overrides the 'crop' value for the top side. 0 means no cropping, 50 means crop half of the image height, 0.2 .. 0.5 recommended value."
+        ),
+    crop_bottom: float = Query(
+        default=0.0,
+        ge=0.0,
+        le=50.0,
+        description="Optional percent to crop from the BOTTOM side of the image before OCR. Overrides the 'crop' value for the bottom side. 0 means no cropping, 50 means crop half of the image height, 0.2 .. 0.5 recommended value."
+        ),
     ):
     """Block-based page OCR that extracts text and tables and returns structured HTML.  
     Faster than full-page OCR and able to process very large pages with a lot of content 
@@ -401,15 +485,16 @@ async def ocr_blocks(file: UploadFile = File(...),
             inference_manager.start()
         update_request_count()
         start_time = perf_counter()
-        if file.content_type == "application/pdf":
-            # For PDFs, render the first page to an image for OCR
-            image = get_page_image(file, page_num=1, dpi=dpi)
-        else:
-            image = Image.open(file.file).convert("RGB")
-        image = trim_empty_background(image)
-        if crop > 0.0:
-            image = crop_by_percent(image, crop)
-        # image.save("/home/al/prj/ITSumma/NPZ/processed_image.png")  # Debugging line to check the processed image
+        image = load_and_preprocess_image(
+            file,
+            dpi=dpi,
+            trim=trim,
+            crop=crop,
+            crop_left=crop_left,
+            crop_right=crop_right,
+            crop_top=crop_top,
+            crop_bottom=crop_bottom,
+        )
         layout_predictor = LayoutPredictor(inference_manager)
         layouts = layout_predictor([image])
         if not layouts or not layouts[0].bboxes:
