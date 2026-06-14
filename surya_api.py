@@ -1,7 +1,7 @@
 #!/home/al/local/AI-tools/surya-api/.venv/bin/python
 # -*- coding: utf-8 -*-
 
-import fcntl
+import portalocker
 from filelock import FileLock, Timeout
 import logging.config
 import copy
@@ -172,7 +172,7 @@ async def lifespan(app: FastAPI):
 
     try:
         # Attempt non-blocking exclusive lock
-        fcntl.flock(file_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        portalocker.lock(file_descriptor, portalocker.LOCK_EX | portalocker.LOCK_NB)
         print("Server starting...")
         background_task = asyncio.create_task(resource_management_loop())
     except BlockingIOError:
@@ -185,7 +185,7 @@ async def lifespan(app: FastAPI):
     if background_task:
         background_task.cancel()
     try:
-        fcntl.flock(file_descriptor, fcntl.LOCK_UN)
+        portalocker.unlock(file_descriptor)
         os.close(file_descriptor)
     except Exception:
         pass
