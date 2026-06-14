@@ -12,6 +12,7 @@ from typing import List
 import pypdfium2
 import streamlit as st
 import streamlit.components.v1 as components
+# import streamlit.iframe as st_iframe #upcoming after 2026-06-01 in replace of components.html
 from PIL import Image, ImageDraw
 
 from surya.debug.draw import draw_polys_on_image, draw_bboxes_on_image
@@ -362,9 +363,9 @@ if run_text_det:
     det_img, text_pred, elapsed = text_detection(pil_image)
     with col1:
         _show_timing("Text detection", elapsed, f"{len(text_pred.bboxes)} polys")
-        st.image(det_img, caption="Detected Text", use_container_width=True)
+        st.image(det_img, caption="Detected Text", width='stretch')
         st.json(
-            text_pred.model_dump(exclude=["heatmap", "affinity_map"]), expanded=False
+            text_pred.model_dump(exclude={"heatmap", "affinity_map"}), expanded=False
         )
 
 
@@ -372,7 +373,7 @@ if run_layout:
     annotated, pred, elapsed = layout_detection(pil_image)
     with col1:
         _show_timing("Layout", elapsed, f"{len(pred.bboxes)} blocks")
-        st.image(annotated, caption="Detected Layout", use_container_width=True)
+        st.image(annotated, caption="Detected Layout", width='stretch')
         st.json(pred.model_dump(), expanded=False)
 
 
@@ -387,7 +388,7 @@ if run_block_ocr:
         st.image(
             annotated,
             caption="Block OCR (green=ok, orange=skipped, red=error)",
-            use_container_width=True,
+            width='stretch',
         )
         full_html = _assemble_page_html(page)
         with st.expander("Full page HTML (rendered)", expanded=False):
@@ -436,7 +437,7 @@ if run_full_page_ocr:
         st.image(
             annotated,
             caption="Full-Page OCR (green=ok, orange=skipped, red=error)",
-            use_container_width=True,
+            width='stretch',
         )
         full_html = _assemble_page_html(page)
         with st.expander("Full page HTML (rendered)", expanded=False):
@@ -466,7 +467,7 @@ if run_table_rec:
         _show_timing(f"Table Rec — {table_mode}", t_table)
         if not skip_table_detection:
             _show_timing("Table Rec — total", t_layout + t_table)
-        st.image(table_img, caption="Table Recognition", use_container_width=True)
+        st.image(table_img, caption="Table Recognition", width='stretch')
         for pred in preds:
             if pred.mode == "full" and pred.html:
                 with st.expander("Table HTML"):
@@ -487,4 +488,4 @@ if run_ocr_errors:
 
 
 with col2:
-    st.image(pil_image, caption="Uploaded Image", use_container_width=True)
+    st.image(pil_image, caption="Uploaded Image", width='stretch')
