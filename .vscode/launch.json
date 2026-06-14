@@ -5,17 +5,19 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "surya-api.py",
+            "name": "surya_api.py",
             "type": "debugpy",
             "request": "launch",
-            "program": "surya-api.py",
+            "program": "surya_api.py",
             "console": "integratedTerminal",
             "env": {
-                "PATH": "/home/al/local/AI-tools/surya-api/.venv/bin:$PATH",
-                "LD_LIBRARY_PATH": "/usr/local/lib",
+                "PATH": "/home/al/local/AI-tools/surya_api/.venv/bin:/usr/local/cuda-13.1/bin:$PATH",
+                "LD_LIBRARY_PATH": "/usr/local/lib:/usr/local/cuda-13.1/lib64:$LD_LIBRARY_PATH",
                 "SURYA_INFERENCE_BACKEND": "llamacpp",
+                // "SURYA_INFERENCE_BACKEND": "vllm",
                 "SURYA_INFERENCE_CTX_SIZE": "262144",
-                "SURYA_INFERENCE_PARALLEL": "5",
+                "SURYA_INFERENCE_PARALLEL": "1",
+                // "SURYA_GUIDED_TABLE_REC": "true",
                 // "SURYA_MAX_TOKENS_FULL_PAGE": "262144",
                 // "SURYA_INFERENCE_CTX_PER_SLOT": "262144",
                 "LLAMA_CPP_NGL": "999"
@@ -28,7 +30,7 @@
             "program": "surya-gui",
             "console": "integratedTerminal",
             "env": {
-                "PATH": "/home/al/local/AI-tools/surya-api/.venv/bin:$PATH",
+                "PATH": "/home/al/local/AI-tools/surya_api/.venv/bin:$PATH",
                 "LD_LIBRARY_PATH": "/usr/local/lib",
                 "SURYA_INFERENCE_BACKEND": "llamacpp",
                 "SURYA_INFERENCE_CTX_SIZE": "100000",
