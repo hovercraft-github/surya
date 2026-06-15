@@ -1,4 +1,3 @@
-from math import sqrt
 import io
 import os
 import numpy as np
@@ -124,98 +123,6 @@ def _entropy_from_chunks(image_bytes: bytes, chunk_boxes: list[tuple[int, int, i
     img = Image.open(io.BytesIO(image_bytes))
     return [entropy(img.crop(box).getdata()) for box in chunk_boxes]
 
-
-def trim_white_background(image: Image.Image, threshold: int | None = None) -> Image.Image:
-
-    gray = image.convert("L")
-
-    if threshold is None:
-        colors = [(int(x[0]), int(x[1])) for x in gray.getcolors(maxcolors=256) or []]
-        if not colors or len(colors) < 2:
-            return image
-        sorted_colors = sorted(colors, key=lambda x: x[1], reverse=True)
-        values = [c[1] for c in sorted_colors]
-        weights = [c[0] for c in sorted_colors]
-        threshold = int(np.average(values, weights=weights))
-        light = sorted_colors[0][1]
-        dark = sorted_colors[-1][1]
-        if threshold == light or threshold == dark:
-            return image
-
-    inverse = gray.point(lambda x: 255 if x <= threshold else 0)
-    # bg = Image.new(image.mode, image.size, bg_color)
-    # diff = ImageChops.difference(image, bg)
-    bbox = inverse.getbbox()
-    if bbox:
-        image = image.crop(bbox)
-        gray = image.convert("L")
-        inverse = gray.point(lambda x: 255 if x <= threshold else 0)
-    n_points_total = image_white_cnt_points(inverse, white_threshold=threshold)
-    if n_points_total == 0:
-        return image
-    w,h = image.size
-    h_step = max(1, h // 10)
-    w_step = max(1, w // 10)
-    crop_top = 0
-    crop_left = 0
-    crop_bottom = h
-    crop_right = w
-    n_removed = 0
-    for y in range(0, h, h_step):
-        chunk = inverse.crop((0, y, w, min(y + h_step, h)))
-        chunk_points = image_white_cnt_points(chunk, white_threshold=threshold)
-        n_removed += chunk_points
-        if n_removed / n_points_total < 0.01:
-            crop_top = y + h_step
-        else:
-            break
-    n_removed = 0
-    for y in range(h, 0, -h_step):
-        chunk = inverse.crop((0, max(y - h_step, 0), w, y))
-        chunk_points = image_white_cnt_points(chunk, white_threshold=threshold)
-        n_removed += chunk_points
-        if n_removed / n_points_total < 0.01:
-            crop_bottom = y - h_step
-        else:
-            break
-    n_removed = 0
-    for x in range(0, w, w_step):
-        chunk = inverse.crop((x, 0, min(x + w_step, w), h))
-        chunk_points = image_white_cnt_points(chunk, white_threshold=threshold)
-        n_removed += chunk_points
-        if n_removed / n_points_total < 0.01:
-            crop_left = x + w_step
-        else:
-            break
-    n_removed = 0
-    for x in range(w, 0, -w_step):
-        chunk = inverse.crop((max(x - w_step, 0), 0, x, h))
-        chunk_points = image_white_cnt_points(chunk, white_threshold=threshold)
-        n_removed += chunk_points
-        if n_removed / n_points_total < 0.01:
-            crop_right = x - w_step
-        else:
-            break
-    if crop_left >= crop_right or crop_top >= crop_bottom:
-        return image
-    if crop_left > 0 or crop_top > 0 or crop_right < w or crop_bottom < h:
-        image = image.crop((crop_left, crop_top, crop_right, crop_bottom))
-    return image
-
-
-def color_distance(pixel, bg, color_space='sRGB'):
-
-    '''Calculates the color distance between two pixels according to a specified color space.  
-    Returned values are normalised to be between 0 and 1.  
-    Only sRGB is currently supported, but other color spaces could be added in the future.
-    '''
-
-    if color_space.lower() == 'srgb':
-        norm = sqrt(3* 255**2)
-        cdist = sqrt((pixel[0] - bg[0])**2 + (pixel[1] - bg[1])**2 + (pixel[2] - bg[2])**2)
-
-        return cdist/norm
-    return 0.0
 
 def _split_round_robin(items, n_slices):
     """Split ``items`` into ``n_slices`` lists using round-robin assignment."""

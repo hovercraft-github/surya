@@ -43,7 +43,6 @@ from contextlib import asynccontextmanager
 from anyio.lowlevel import RunVar
 from anyio import CapacityLimiter
 
-from surya.table_rec import TableRecPredictor
 from surya.table_rec.schema import TableCell, TableCol, TableResult, TableRow
 
 
