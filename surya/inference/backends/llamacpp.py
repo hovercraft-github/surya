@@ -12,8 +12,6 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Optional
-import threading
-from threading import Lock
 
 from huggingface_hub import hf_hub_download
 from openai import OpenAI
@@ -70,143 +68,23 @@ def _openai_url(port: int) -> str:
 class LlamaCppBackend(Backend):
     name = "llamacpp"
 
-    # def __init__(self):
-    handle: Optional[ServerHandle] = None
-    _client: Optional[OpenAI] = None
-    _lock = Lock()
-    starting: bool = False
+    def __init__(self):
+        self.handle: Optional[ServerHandle] = None
+        self._client: Optional[OpenAI] = None
 
     def start(self) -> ServerHandle:
-        current = threading.current_thread()
-        logger.info(f"Starting LlamaCppBackend instance {id(self)}, thread {current.name} ({current.ident})")
-        with self._lock:
-            if self.handle is not None or self.starting:
-                return self.handle
+        if self.handle is not None:
+            return self.handle
 
-            self.starting = True
-            # If user pinned an external server, attach without spawning.
-            # No binary or GGUF download needed in that case.
-            if settings.SURYA_INFERENCE_URL:
-                spawned = attach_or_spawn(
-                    backend=self.name,
-                    expected_model_name=settings.SURYA_MODEL_CHECKPOINT,
-                    spawn_fn=lambda port: SpawnHandle(
-                        pid=None, cleanup_id="", cleanup_kind="process"
-                    ),  # never called
-                    health_url_for=_health_url,
-                    openai_url_for=_openai_url,
-                    startup_timeout=settings.SURYA_INFERENCE_STARTUP_TIMEOUT,
-                )
-                self.handle = ServerHandle(
-                    base_url=spawned.base_url,
-                    model_name=spawned.model_name,
-                    spawned_by_us=spawned.spawned_by_us,
-                )
-                self._client = OpenAI(api_key="EMPTY", base_url=self.handle.base_url)
-                self.starting = False
-                return self.handle
-
-            binary = _resolve_llama_server_binary()
-
-            # Pre-download GGUFs so the spawn doesn't race the download
-            if (
-                settings.SURYA_GGUF_LOCAL_MODEL_PATH
-                and settings.SURYA_GGUF_LOCAL_MMPROJ_PATH
-            ):
-                model_path = settings.SURYA_GGUF_LOCAL_MODEL_PATH
-                mmproj_path = settings.SURYA_GGUF_LOCAL_MMPROJ_PATH
-            else:
-                model_path, mmproj_path = _download_gguf_files()
-
-            # Total KV-cache budget. llama-server divides --ctx-size across
-            # --parallel slots, so a too-small total silently truncates outputs
-            # once each slot's share fills. Scale with parallel by default;
-            # SURYA_INFERENCE_CTX_SIZE overrides to a fixed value if set.
-            parallel = settings.SURYA_INFERENCE_PARALLEL
-            per_slot = settings.SURYA_INFERENCE_CTX_PER_SLOT
-            ctx_size = settings.SURYA_INFERENCE_CTX_SIZE
-            if ctx_size is None:
-                ctx_size = max(16384, parallel * per_slot)
-            effective_per_slot = ctx_size // max(parallel, 1)
-            logger.info(
-                f"llama-server ctx-size={ctx_size} "
-                f"(~{effective_per_slot}/slot × {parallel} parallel slots)"
-            )
-            if effective_per_slot < per_slot:
-                logger.warning(
-                    f"per-slot ctx ({effective_per_slot}) is below recommended "
-                    f"{per_slot}; outputs may truncate. Raise "
-                    f"SURYA_INFERENCE_CTX_SIZE or SURYA_INFERENCE_CTX_PER_SLOT, "
-                    f"or lower SURYA_INFERENCE_PARALLEL."
-                )
-
-            if ctx_size == -1:
-                ctx_size = "all"
-            def spawn_fn(port: int) -> SpawnHandle:
-                cmd = [
-                    binary,
-                    "-m",
-                    model_path,
-                    "--mmproj",
-                    mmproj_path,
-                    # "--main-gpu",
-                    # "0",
-                    # "--tensor-split",
-                    # "1,1",
-                    # "--n-cpu-moe",
-                    # "0",
-                    # "--flash-attn",
-                    # "on",
-                    "--no-mmap",
-                    "--direct-io",
-                    "--numa",
-                    "isolate",
-                    "--cpu-range",
-                    "0-{}".format(max(0, (os.cpu_count() or 1) - 1)),
-                    "--cpu-strict",
-                    "1",
-                    "-b",
-                    "4096",
-                    "-ub",
-                    "4096",
-                    "-t",
-                    str((os.cpu_count() or 1) // 2),
-                    "-ngl",
-                    str(settings.LLAMA_CPP_NGL),
-                    "--host",
-                    settings.SURYA_INFERENCE_HOST,
-                    "--port",
-                    str(port),
-                    "--parallel",
-                    str(parallel),
-                    "--ctx-size",
-                    str(ctx_size),
-                    "--no-mmproj-offload" if settings.LLAMA_CPP_NO_MMPROJ_OFFLOAD else "",
-                    "--alias",
-                    settings.SURYA_MODEL_CHECKPOINT,
-                    "--jinja",
-                ]
-                cmd = [c for c in cmd if c]
-                for extra in (settings.LLAMA_CPP_EXTRA_ARGS or "").split():
-                    cmd.append(extra)
-                logger.info(f"Spawning: {' '.join(cmd)}")
-                log_path = Path("~/.cache/datalab/surya/llamacpp_server.log").expanduser()
-                log_path.parent.mkdir(parents=True, exist_ok=True)
-                log_fp = open(log_path, "ab")
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=log_fp,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-                return SpawnHandle(
-                    pid=proc.pid, cleanup_id=str(proc.pid), cleanup_kind="process"
-                )
-
+        # If user pinned an external server, attach without spawning.
+        # No binary or GGUF download needed in that case.
+        if settings.SURYA_INFERENCE_URL:
             spawned = attach_or_spawn(
                 backend=self.name,
                 expected_model_name=settings.SURYA_MODEL_CHECKPOINT,
-                spawn_fn=spawn_fn,
+                spawn_fn=lambda port: SpawnHandle(
+                    pid=None, cleanup_id="", cleanup_kind="process"
+                ),  # never called
                 health_url_for=_health_url,
                 openai_url_for=_openai_url,
                 startup_timeout=settings.SURYA_INFERENCE_STARTUP_TIMEOUT,
@@ -216,16 +94,103 @@ class LlamaCppBackend(Backend):
                 model_name=spawned.model_name,
                 spawned_by_us=spawned.spawned_by_us,
             )
-            self._client = OpenAI(
-                api_key="EMPTY",
-                base_url=self.handle.base_url,
-            )
-            self.starting = False
+            self._client = OpenAI(api_key="EMPTY", base_url=self.handle.base_url)
             return self.handle
+
+        binary = _resolve_llama_server_binary()
+
+        # Pre-download GGUFs so the spawn doesn't race the download
+        if (
+            settings.SURYA_GGUF_LOCAL_MODEL_PATH
+            and settings.SURYA_GGUF_LOCAL_MMPROJ_PATH
+        ):
+            model_path = settings.SURYA_GGUF_LOCAL_MODEL_PATH
+            mmproj_path = settings.SURYA_GGUF_LOCAL_MMPROJ_PATH
+        else:
+            model_path, mmproj_path = _download_gguf_files()
+
+        # Total KV-cache budget. llama-server divides --ctx-size across
+        # --parallel slots, so a too-small total silently truncates outputs
+        # once each slot's share fills. Scale with parallel by default;
+        # SURYA_INFERENCE_CTX_SIZE overrides to a fixed value if set.
+        parallel = settings.SURYA_INFERENCE_PARALLEL
+        per_slot = settings.SURYA_INFERENCE_CTX_PER_SLOT
+        ctx_size = settings.SURYA_INFERENCE_CTX_SIZE
+        if ctx_size is None:
+            ctx_size = max(16384, parallel * per_slot)
+        effective_per_slot = ctx_size // max(parallel, 1)
+        logger.info(
+            f"llama-server ctx-size={ctx_size} "
+            f"(~{effective_per_slot}/slot × {parallel} parallel slots)"
+        )
+        if effective_per_slot < per_slot:
+            logger.warning(
+                f"per-slot ctx ({effective_per_slot}) is below recommended "
+                f"{per_slot}; outputs may truncate. Raise "
+                f"SURYA_INFERENCE_CTX_SIZE or SURYA_INFERENCE_CTX_PER_SLOT, "
+                f"or lower SURYA_INFERENCE_PARALLEL."
+            )
+
+        def spawn_fn(port: int) -> SpawnHandle:
+            cmd = [
+                binary,
+                "-m",
+                model_path,
+                "--mmproj",
+                mmproj_path,
+                "-ngl",
+                str(settings.LLAMA_CPP_NGL),
+                "--host",
+                settings.SURYA_INFERENCE_HOST,
+                "--port",
+                str(port),
+                "--parallel",
+                str(parallel),
+                "--ctx-size",
+                str(ctx_size),
+                "--no-mmproj-offload" if settings.LLAMA_CPP_NO_MMPROJ_OFFLOAD else "",
+                "--alias",
+                settings.SURYA_MODEL_CHECKPOINT,
+                "--jinja",
+            ]
+            cmd = [c for c in cmd if c]
+            for extra in (settings.LLAMA_CPP_EXTRA_ARGS or "").split():
+                cmd.append(extra)
+            logger.info(f"Spawning: {' '.join(cmd)}")
+            log_path = Path("~/.cache/datalab/surya/llamacpp_server.log").expanduser()
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_fp = open(log_path, "ab")
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fp,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            return SpawnHandle(
+                pid=proc.pid, cleanup_id=str(proc.pid), cleanup_kind="process"
+            )
+
+        spawned = attach_or_spawn(
+            backend=self.name,
+            expected_model_name=settings.SURYA_MODEL_CHECKPOINT,
+            spawn_fn=spawn_fn,
+            health_url_for=_health_url,
+            openai_url_for=_openai_url,
+            startup_timeout=settings.SURYA_INFERENCE_STARTUP_TIMEOUT,
+        )
+        self.handle = ServerHandle(
+            base_url=spawned.base_url,
+            model_name=spawned.model_name,
+            spawned_by_us=spawned.spawned_by_us,
+        )
+        self._client = OpenAI(
+            api_key="EMPTY",
+            base_url=self.handle.base_url,
+        )
+        return self.handle
 
     def stop(self) -> None:
         # atexit handler in spawn.py owns cleanup; nothing to do here.
-        logger.info("LlamaCppBackend stop() called; relying on spawn.py atexit handler for cleanup.")
         self.handle = None
         self._client = None
 

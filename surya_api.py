@@ -70,7 +70,7 @@ LOGGING_CONFIG = {
     "loggers": {
         # Explicitly configure your chosen third-party library logger here
         "surya": {
-            "handlers": ["console"],
+            # "handlers": ["console"],
             "level": "INFO",
             "propagate": True,
         },
@@ -519,7 +519,7 @@ async def ocr_blocks(file: UploadFile = File(...),
     that should be filtered out (like images), also is more accurate for complex table layouts.
     """
     try:
-        logger.warning(
+        logger.info(
             f"Received file: {file.filename}, content_type: {file.content_type}"
         )
         _, last_updated, port = get_request_count()
@@ -589,7 +589,7 @@ async def ocr_blocks(file: UploadFile = File(...),
 
         full_html = '<div id="ocr-page">' + "\n".join(html_parts) + "</div>"
         end_time = perf_counter()
-        logger.warning(
+        logger.info(
             f"OCR completed for {file.filename}, extracted {len(blocks_data)} blocks in {end_time - start_time:.2f} seconds."
         )
         return {
