@@ -21,7 +21,8 @@ from crown.utils import poligon_expand
 from surya.layout.schema import LayoutBox, LayoutResult
 from surya.recognition.schema import PageOCRResult
 from surya.settings import settings
-from surya.inference import SuryaInferenceManager
+# from surya.inference import SuryaInferenceManager
+from crown.inference import CrownSuryaInferenceManager
 from surya.recognition import RecognitionPredictor
 
 # from surya.detection import DetectionPredictor
@@ -246,7 +247,7 @@ app.add_middleware(
 
 
 # Load models once when the application starts
-inference_manager = SuryaInferenceManager()
+inference_manager = CrownSuryaInferenceManager()
 
 
 @app.post("/ocr/full/")
@@ -421,6 +422,27 @@ def table_recognition(
     return table_preds, table_bboxes
 
 
+async def text_recognition_async(
+    img: Image.Image,
+    layouts: list[LayoutResult],
+) -> tuple[list[PageOCRResult], list[tuple[int, ...]]]:
+    """Async wrapper for :func:`text_recognition` that offloads the blocking
+    inference work to a worker thread via :func:`asyncio.to_thread` so the
+    event loop stays responsive while the recognizer runs."""
+    return await asyncio.to_thread(text_recognition, img, layouts)
+
+
+async def table_recognition_async(
+    img: Image.Image,
+    layout: LayoutResult,
+    mode: str,
+) -> tuple[list[TableResult], list[tuple[int, ...]]]:
+    """Async wrapper for :func:`table_recognition` that offloads the blocking
+    inference work to a worker thread via :func:`asyncio.to_thread` so the
+    event loop stays responsive while the table recognizer runs."""
+    return await asyncio.to_thread(table_recognition, img, layout, mode)
+
+
 @app.post("/ocr/block/")
 async def ocr_blocks(file: UploadFile = File(...),
     dpi: int | None = Query(
@@ -502,8 +524,10 @@ async def ocr_blocks(file: UploadFile = File(...),
         margin = int(max(width, height) / 200)  # Dynamic margin based on image size (e.g., 2px for 1000px image)
         for block in layouts[0].bboxes:
             poligon_expand(block.polygon, margin=margin)
-        texts, text_bboxes  = text_recognition(image, layouts)
-        tables, table_bboxes = table_recognition(image, layouts[0], mode="td")
+        # Run text and table recognition sequentially (texts first, then tables)
+        # via asyncio.to_thread so each blocking inference call yields the event loop.
+        texts, text_bboxes = await text_recognition_async(image, layouts)
+        tables, table_bboxes = await table_recognition_async(image, layouts[0], mode="td")
         blocks_data = []
         for pred in texts:
             for block in pred.blocks:
@@ -566,11 +590,11 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    n_workers = settings.SURYA_INFERENCE_PARALLEL or 1
+    # n_workers = settings.SURYA_INFERENCE_PARALLEL or 1
     uvicorn.run(
         "surya_api:app",
         host="0.0.0.0",
         port=args.port,
-        workers=n_workers,
+        workers=1,
         log_config=None,
     )  #  , reload=True
