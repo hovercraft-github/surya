@@ -316,7 +316,7 @@ async def ocr_full_page(file: UploadFile = File(...),
             inference_manager.start()
         update_request_count()
         start_time = perf_counter()
-        image = load_and_preprocess_image(
+        image = await load_and_preprocess_image_async(
             file,
             dpi=dpi,
             trim=trim,
@@ -327,7 +327,7 @@ async def ocr_full_page(file: UploadFile = File(...),
             crop_bottom=crop_bottom,
         )
         # Use full_page=True for direct HTML extraction with HIGH_ACCURACY_BBOX_PROMPT
-        predictions = recognizer([image], full_page=True)
+        predictions = await asyncio.to_thread(recognizer, [image], full_page=True)
 
         if not predictions:
             return {"html": "", "blocks": []}
@@ -432,6 +432,32 @@ async def text_recognition_async(
     return await asyncio.to_thread(text_recognition, img, layouts)
 
 
+async def load_and_preprocess_image_async(
+    file: UploadFile,
+    dpi: int | None,
+    trim: float,
+    crop: float,
+    crop_left: float = 0.0,
+    crop_right: float = 0.0,
+    crop_top: float = 0.0,
+    crop_bottom: float = 0.0,
+) -> Image.Image:
+    """Async wrapper for :func:`load_and_preprocess_image` that offloads the blocking
+    image loading and preprocessing work to a worker thread via :func:`asyncio.to_thread`
+    so the event loop stays responsive while processing images."""
+    return await asyncio.to_thread(
+        load_and_preprocess_image,
+        file,
+        dpi,
+        trim,
+        crop,
+        crop_left,
+        crop_right,
+        crop_top,
+        crop_bottom,
+    )
+
+
 async def table_recognition_async(
     img: Image.Image,
     layout: LayoutResult,
@@ -506,7 +532,7 @@ async def ocr_blocks(file: UploadFile = File(...),
             inference_manager.start()
         update_request_count()
         start_time = perf_counter()
-        image = load_and_preprocess_image(
+        image = await load_and_preprocess_image_async(
             file,
             dpi=dpi,
             trim=trim,
