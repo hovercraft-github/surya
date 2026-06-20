@@ -1,6 +1,13 @@
 #!/home/al/local/AI-tools/surya-api/.venv/bin/python
 # -*- coding: utf-8 -*-
 
+import multiprocessing
+# This MUST be called before any other app setups or process creations
+try:
+    multiprocessing.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass  # Already set
+
 import portalocker
 from filelock import FileLock, Timeout
 import logging.config
@@ -22,7 +29,7 @@ from surya.layout.schema import LayoutBox, LayoutResult
 from surya.recognition.schema import PageOCRResult
 from surya.settings import settings
 # from surya.inference import SuryaInferenceManager
-from crown.inference import CrownSuryaInferenceManager
+from crown.inference import CrownSuryaInferenceManager, BatchBusyError
 from surya.recognition import RecognitionPredictor
 
 # from surya.detection import DetectionPredictor
@@ -365,6 +372,13 @@ async def ocr_full_page(file: UploadFile = File(...),
             "blocks": blocks_data,
             "page_bbox": predictions[0].image_bbox if predictions else [],
         }
+    except BatchBusyError as e:
+        logger.warning(f"Batch busy for {file.filename}: {e}")
+        raise HTTPException(
+            status_code=429,
+            detail=str(e),
+            headers={"Retry-After": str(int(max(e.retry_after, 1)))},
+        )
     except Exception as e:
         msg = str(e)
         logger.error(f"OCR failed for {file.filename}: {msg}")
@@ -596,6 +610,13 @@ async def ocr_blocks(file: UploadFile = File(...),
             "blocks": blocks_data,
             "html": full_html,
         }
+    except BatchBusyError as e:
+        logger.warning(f"Batch busy for {file.filename}: {e}")
+        raise HTTPException(
+            status_code=429,
+            detail=str(e),
+            headers={"Retry-After": str(int(max(e.retry_after, 1)))},
+        )
     except Exception as e:
         msg = str(e)
         logger.error(f"OCR failed for {file.filename}: {msg}")

@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
+import time
 from typing import List, Optional
 
 from openai import OpenAI
@@ -203,31 +205,121 @@ def _build_backend(method: str) -> Backend:
     )
 
 
+class BatchBusyError(Exception):
+    """Raised when a new batch is scheduled while a previous one is still running.
+
+    Carries an estimated ``retry_after`` value (in seconds) that the REST API
+    should return to the client via the ``Retry-After`` HTTP header on a 429
+    response.
+    """
+
+    def __init__(self, retry_after: float, message: Optional[str] = None) -> None:
+        self.retry_after = retry_after
+        super().__init__(
+            message
+            or f"Another batch is already running; retry after {retry_after:.1f}s."
+        )
+
+
 class CrownSuryaInferenceManager(SuryaInferenceManager):
     """Crown-owned subclass of :class:`SuryaInferenceManager`.
 
     Construction is identical to the parent. Override methods here when crown
     needs to add logging, instrumentation, retry, or any other custom
     behavior; the rest of the codebase keeps using this type.
+
+    This manager is a singleton: only one instance may exist at a time within
+    a process. It also serializes batch generation: a single batch may run at
+    any given moment. Attempting to start a new batch while a previous one is
+    still in flight raises :class:`BatchBusyError` carrying an estimated
+    ``Retry-After`` value (in seconds).
     """
 
+    # Singleton bookkeeping.
+    _instance: Optional["CrownSuryaInferenceManager"] = None
+    _instance_lock = threading.Lock()
+
+    # Heuristic: how long we expect a batch to take, used as the fallback
+    # Retry-After estimate when no prior batch has completed yet.
+    _default_batch_estimate: float = 30.0
+    # Batch serialization state.
+    _batch_lock = threading.Lock()
+    _batch_running = False
+    _batch_started_at: Optional[float] = None
+    _last_batch_duration: Optional[float] = None
+
     def __init__(self, method: Optional[str] = None, lazy: bool = True):
-        super().__init__(method=method, lazy=True)
-        self.backend: Backend = _build_backend(self.method)
-        if not lazy:
-            self.backend.start()
+        # Enforce single-instance invariant. Acquiring the lock here also
+        # serializes concurrent construction attempts.
+        with CrownSuryaInferenceManager._instance_lock:
+            super().__init__(method=method, lazy=True)
+            if CrownSuryaInferenceManager._instance is None:
+                CrownSuryaInferenceManager._instance = self
+            # This trick is against fastapi and other forks: TODO: verify on Windows and MacOS. If this fails, we may need to use a more robust singleton pattern.
+            elif CrownSuryaInferenceManager._instance is not self:
+                self.backend: Backend = _build_backend(self.method)
+
+    # -- singleton access -------------------------------------------------
+
+    @classmethod
+    def get_instance(cls) -> "CrownSuryaInferenceManager":
+        """Return the single live instance, raising if none exists yet."""
+        with cls._instance_lock:
+            if cls._instance is None:
+                raise RuntimeError(
+                    "No CrownSuryaInferenceManager instance has been created yet."
+                )
+            return cls._instance
+
+    @classmethod
+    def reset_instance(cls) -> None:
+        """Clear the singleton slot. Intended for tests / teardown only."""
+        with cls._instance_lock:
+            cls._instance = None
+
+    # -- lifecycle --------------------------------------------------------
 
     def start(self) -> None:
+        if not hasattr(self, "backend"):
+            self.backend = _build_backend(self.method)
         super().start()
 
     def stop(self) -> None:
         super().stop()
 
+    # -- batch generation -------------------------------------------------
+
+    def _estimate_retry_after(self) -> float:
+        """Estimate how many seconds until the in-flight batch completes."""
+        if self._last_batch_duration is not None:
+            # Use the most recent observed duration as the estimate.
+            elapsed = time.monotonic() - (self._batch_started_at or time.monotonic())
+            remaining = self._last_batch_duration - elapsed
+            return max(remaining, 1.0)
+        # No history yet: fall back to the configured default estimate.
+        return self._default_batch_estimate
+
     def generate(self, batch: List[BatchInputItem]) -> List[BatchOutputItem]:
-        return super().generate(batch)
+        # Only one batch at a time. Try to acquire the batch lock without
+        # blocking so we can immediately report a Retry-After estimate to the
+        # caller instead of queueing behind the running batch.
+        if not self._batch_lock.acquire(blocking=False):
+            raise BatchBusyError(retry_after=self._estimate_retry_after())
+        try:
+            self._batch_running = True
+            self._batch_started_at = time.monotonic()
+            start = time.monotonic()
+            result = super().generate(batch)
+            self._last_batch_duration = time.monotonic() - start
+            return result
+        finally:
+            self._batch_running = False
+            self._batch_started_at = None
+            self._batch_lock.release()
 
 
 __all__ = [
+    "BatchBusyError",
     "CrownLlamaCppBackend",
     "CrownSuryaInferenceManager",
     "CrownVllmBackend",
