@@ -17,6 +17,7 @@ import os
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import List, Optional
 
 from openai import OpenAI
@@ -36,9 +37,31 @@ from surya.settings import settings
 
 
 from crown.openai_client import chat_completions_batch
+from crown.settings import crown_settings
 
 
 logger = get_logger()
+
+
+def _llamacpp_max_workers() -> int:
+    """Client-side concurrency for the llama.cpp backend.
+
+    Decoupled from the server's ``--parallel`` slots: client workers only
+    keep the HTTP queue full, while slots cost KV-cache memory. Default to
+    the server slot count (surya's SURYA_INFERENCE_PARALLEL) so the queue
+    stays at least as full as the server can drain.
+    """
+    return crown_settings.SURYA_INFERENCE_MAX_WORKERS or settings.SURYA_INFERENCE_PARALLEL
+
+
+def _vllm_max_workers(server_capacity: int) -> int:
+    """Client-side concurrency for the vllm backend.
+
+    Defaults to the server's ``--max-num-seqs`` so the HTTP queue saturates
+    the continuous-batching capacity. Override via
+    ``SURYA_INFERENCE_MAX_WORKERS`` (e.g. for a shared external server).
+    """
+    return crown_settings.SURYA_INFERENCE_MAX_WORKERS or server_capacity
 
 
 class CrownVllmBackend(VllmBackend):
@@ -48,6 +71,10 @@ class CrownVllmBackend(VllmBackend):
 
     def __init__(self) -> None:
         super().__init__()
+        # Continuous-batching capacity of the spawned server, set in
+        # start() and consumed by generate() as the client-concurrency
+        # default so the HTTP queue keeps the server full.
+        self._max_num_seqs: int = 0
 
     def start(self):  # type: ignore[override]
         if self.handle is not None:
@@ -77,6 +104,9 @@ class CrownVllmBackend(VllmBackend):
 
         docker = _resolve_docker_binary()
         max_batched_tokens, max_num_seqs = _gpu_settings(settings.VLLM_GPU_TYPE)
+        # Remember the server's continuous-batching capacity so generate()
+        # can size the client worker pool to keep it saturated.
+        self._max_num_seqs = max_num_seqs
 
         def spawn_fn(port: int) -> SpawnHandle:
             container_name = f"surya-vllm-{port}"
@@ -165,18 +195,162 @@ class CrownVllmBackend(VllmBackend):
             client=self._client,
             model_name=self.handle.model_name,
             timeout=settings.SURYA_INFERENCE_TIMEOUT_SECONDS,
-            max_workers=settings.SURYA_INFERENCE_PARALLEL,
+            max_workers=_vllm_max_workers(max(1, self._max_num_seqs)),
             request_logprobs_default=settings.SURYA_INFERENCE_LOGPROBS,
         )
 
 
 class CrownLlamaCppBackend(LlamaCppBackend):
-    """Crown-owned subclass of :class:`LlamaCppBackend`."""
+    """Crown-owned subclass of :class:`LlamaCppBackend`.
+
+    Overrides ``start()`` to spawn llama-server with crown's tuned
+    prompt-processing flags (flash-attn, batch/ubatch sizing, CPU threads,
+    optional NUMA/CPU pinning) gated by :mod:`crown.settings`. The parent's
+    ``--parallel`` / ``--ctx-size`` scaling logic is preserved.
+    """
 
     name = "llamacpp"
 
     def start(self):  # type: ignore[override]
-        return super().start()
+        if self.handle is not None:
+            return self.handle
+
+        # If user pinned an external server, attach without spawning.
+        # No binary or GGUF download needed in that case.
+        if settings.SURYA_INFERENCE_URL:
+            spawned = attach_or_spawn(
+                backend=self.name,
+                expected_model_name=settings.SURYA_MODEL_CHECKPOINT,
+                spawn_fn=lambda port: SpawnHandle(
+                    pid=None, cleanup_id="", cleanup_kind="process"
+                ),  # never called
+                health_url_for=_health_url,
+                openai_url_for=_openai_url,
+                startup_timeout=settings.SURYA_INFERENCE_STARTUP_TIMEOUT,
+            )
+            self.handle = ServerHandle(
+                base_url=spawned.base_url,
+                model_name=spawned.model_name,
+                spawned_by_us=spawned.spawned_by_us,
+            )
+            self._client = OpenAI(api_key="EMPTY", base_url=self.handle.base_url)
+            return self.handle
+
+        binary = _resolve_llama_server_binary()
+
+        # Pre-download GGUFs so the spawn doesn't race the download
+        if (
+            settings.SURYA_GGUF_LOCAL_MODEL_PATH
+            and settings.SURYA_GGUF_LOCAL_MMPROJ_PATH
+        ):
+            model_path = settings.SURYA_GGUF_LOCAL_MODEL_PATH
+            mmproj_path = settings.SURYA_GGUF_LOCAL_MMPROJ_PATH
+        else:
+            model_path, mmproj_path = _download_gguf_files()
+
+        # Total KV-cache budget. llama-server divides --ctx-size across
+        # --parallel slots, so a too-small total silently truncates outputs
+        # once each slot's share fills. Scale with parallel by default;
+        # SURYA_INFERENCE_CTX_SIZE overrides to a fixed value if set.
+        parallel = settings.SURYA_INFERENCE_PARALLEL
+        per_slot = settings.SURYA_INFERENCE_CTX_PER_SLOT
+        ctx_size = settings.SURYA_INFERENCE_CTX_SIZE
+        if ctx_size is None:
+            ctx_size = max(16384, parallel * per_slot)
+        effective_per_slot = ctx_size // max(parallel, 1)
+        logger.info(
+            f"llama-server ctx-size={ctx_size} "
+            f"(~{effective_per_slot}/slot × {parallel} parallel slots)"
+        )
+        if effective_per_slot < per_slot:
+            logger.warning(
+                f"per-slot ctx ({effective_per_slot}) is below recommended "
+                f"{per_slot}; outputs may truncate. Raise "
+                f"SURYA_INFERENCE_CTX_SIZE or SURYA_INFERENCE_CTX_PER_SLOT, "
+                f"or lower SURYA_INFERENCE_PARALLEL."
+            )
+
+        # CPU threads for the non-offloaded parts of the graph.
+        threads = crown_settings.LLAMA_CPP_THREADS
+        if threads is None:
+            threads = max(1, (os.cpu_count() or 1) // 2)
+
+        def spawn_fn(port: int) -> SpawnHandle:
+            cmd = [
+                binary,
+                "-m",
+                model_path,
+                "--mmproj",
+                mmproj_path,
+                "-b",
+                str(crown_settings.LLAMA_CPP_BATCH),
+                "-ub",
+                str(crown_settings.LLAMA_CPP_UBATCH),
+                "-t",
+                str(threads),
+                "-ngl",
+                str(settings.LLAMA_CPP_NGL),
+                "--host",
+                settings.SURYA_INFERENCE_HOST,
+                "--port",
+                str(port),
+                "--parallel",
+                str(parallel),
+                "--ctx-size",
+                str(ctx_size),
+                "--no-mmproj-offload" if settings.LLAMA_CPP_NO_MMPROJ_OFFLOAD else "",
+                "--alias",
+                settings.SURYA_MODEL_CHECKPOINT,
+                "--jinja",
+            ]
+            cmd = [c for c in cmd if c]
+            # Prompt-processing / CPU tuning (crown-owned, safe defaults).
+            if crown_settings.LLAMA_CPP_FLASH_ATTN:
+                cmd += ["--flash-attn", "on"]
+            if crown_settings.LLAMA_CPP_NO_MMAP:
+                cmd.append("--no-mmap")
+            if crown_settings.LLAMA_CPP_DIRECT_IO:
+                cmd.append("--direct-io")
+            if crown_settings.LLAMA_CPP_NUMA:
+                cmd += ["--numa", crown_settings.LLAMA_CPP_NUMA]
+            if crown_settings.LLAMA_CPP_CPU_RANGE:
+                cmd += ["--cpu-range", crown_settings.LLAMA_CPP_CPU_RANGE]
+                if crown_settings.LLAMA_CPP_CPU_STRICT:
+                    cmd += ["--cpu-strict", "1"]
+            for extra in (settings.LLAMA_CPP_EXTRA_ARGS or "").split():
+                cmd.append(extra)
+            logger.info(f"Spawning: {' '.join(cmd)}")
+            log_path = Path("~/.cache/datalab/surya/llamacpp_server.log").expanduser()
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_fp = open(log_path, "ab")
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_fp,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            return SpawnHandle(
+                pid=proc.pid, cleanup_id=str(proc.pid), cleanup_kind="process"
+            )
+
+        spawned = attach_or_spawn(
+            backend=self.name,
+            expected_model_name=settings.SURYA_MODEL_CHECKPOINT,
+            spawn_fn=spawn_fn,
+            health_url_for=_health_url,
+            openai_url_for=_openai_url,
+            startup_timeout=settings.SURYA_INFERENCE_STARTUP_TIMEOUT,
+        )
+        self.handle = ServerHandle(
+            base_url=spawned.base_url,
+            model_name=spawned.model_name,
+            spawned_by_us=spawned.spawned_by_us,
+        )
+        self._client = OpenAI(
+            api_key="EMPTY",
+            base_url=self.handle.base_url,
+        )
+        return self.handle
 
     def stop(self) -> None:
         super().stop()
@@ -189,7 +363,7 @@ class CrownLlamaCppBackend(LlamaCppBackend):
             client=self._client,
             model_name=self.handle.model_name,
             timeout=settings.SURYA_INFERENCE_TIMEOUT_SECONDS,
-            max_workers=settings.SURYA_INFERENCE_PARALLEL,
+            max_workers=_llamacpp_max_workers(),
             request_logprobs_default=settings.SURYA_INFERENCE_LOGPROBS,
         )
 
