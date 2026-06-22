@@ -209,5 +209,9 @@ def chat_completions_batch(
             metadata=item.metadata,
         )
 
+    ret: list[BatchOutputItem] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        return list(executor.map(_process, batch))
+        for i in range(0, len(batch), max_workers):
+            chunk = batch[i : i + max_workers]
+            ret.extend(executor.map(_process, chunk))
+    return ret

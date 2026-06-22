@@ -89,6 +89,8 @@ logging.config.dictConfig(LOGGING_CONFIG)
 backend_type = settings.SURYA_INFERENCE_BACKEND or "vllm"
 LOCK_FILE = _cache_dir() / "surya-api_server.lock"
 LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+inference_manager = CrownSuryaInferenceManager()
+
 
 
 def update_request_count(delta: int = 1) -> None:
@@ -251,10 +253,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-# Load models once when the application starts
-inference_manager = CrownSuryaInferenceManager()
 
 
 @app.post("/ocr/full/")
@@ -557,7 +555,7 @@ async def ocr_blocks(file: UploadFile = File(...),
             crop_bottom=crop_bottom,
         )
         layout_predictor = LayoutPredictor(inference_manager)
-        layouts = layout_predictor([image])
+        layouts = await asyncio.to_thread(layout_predictor, [image])
         if not layouts or not layouts[0].bboxes:
             return {"html": "", "blocks": []}
         width, height = image.size
