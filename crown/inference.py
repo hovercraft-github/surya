@@ -12,13 +12,16 @@ leave the rest to `super()`.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import subprocess
 import threading
 import time
+import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from openai import OpenAI
 
@@ -417,10 +420,26 @@ class CrownSuryaInferenceManager(SuryaInferenceManager):
     # Retry-After estimate when no prior batch has completed yet.
     _default_batch_estimate: float = 30.0
     # Batch serialization state.
-    _batch_lock = threading.Lock()
-    _batch_running = False
     _batch_started_at: Optional[float] = None
     _last_batch_duration: Optional[float] = None
+
+    # Booking service state.
+    _booked_requests: int = 0
+
+    # Batcher state: pending inputs and completed outputs keyed by call_id.
+    # Each value is (timestamp, items) where timestamp is time.monotonic()
+    # for expiration. Guarded by _batcher_lock.
+    _input_batches: Dict[str, Tuple[float, List[BatchInputItem]]] = {}
+    _output_batches: Dict[str, Tuple[float, List[BatchOutputItem]]] = {}
+    _batcher_lock = threading.Lock()
+    _batcher_thread: Optional[threading.Thread] = None
+    _batcher_stop = threading.Event()
+    # Polling interval (seconds) for generate() to probe output_batches and
+    # for the batcher thread to wake up and check input_batches.
+    _batcher_poll_interval: float = 0.05
+    # Entries older than this (seconds, monotonic) are expired from the
+    # input/output maps to bound memory in pathological cases.
+    _batcher_entry_ttl: float = 600.0
 
     def __init__(self, method: Optional[str] = None, lazy: bool = True):
         # Enforce single-instance invariant. Acquiring the lock here also
@@ -432,6 +451,9 @@ class CrownSuryaInferenceManager(SuryaInferenceManager):
             # This trick is against fastapi and other forks: TODO: verify on Windows and MacOS. If this fails, we may need to use a more robust singleton pattern.
             elif CrownSuryaInferenceManager._instance is not self:
                 self.backend: Backend = _build_backend(self.method)
+        # Start the background batcher thread that drains input_batches and
+        # fills output_batches. Daemonized so it never blocks process exit.
+        self._ensure_batcher_thread()
 
     # -- singleton access -------------------------------------------------
 
@@ -457,39 +479,168 @@ class CrownSuryaInferenceManager(SuryaInferenceManager):
         if not hasattr(self, "backend"):
             self.backend = _build_backend(self.method)
         super().start()
+        self._ensure_batcher_thread()
 
     def stop(self) -> None:
+        # Signal the background batcher thread to exit, then join it.
+        self._batcher_stop.set()
+        thread = self._batcher_thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=self._default_batch_estimate)
+        self._batcher_thread = None
+        self._batcher_stop.clear()
         super().stop()
+
+    # -- batcher thread ---------------------------------------------------
+
+    def _ensure_batcher_thread(self) -> None:
+        """Start the background send_batch loop if it isn't running."""
+        if self._batcher_thread is not None and self._batcher_thread.is_alive():
+            return
+        self._batcher_stop.clear()
+        thread = threading.Thread(
+            target=self._send_batch_loop,
+            name="CrownSuryaInferenceManager-batcher",
+            daemon=True,
+        )
+        self._batcher_thread = thread
+        thread.start()
+
+    def _send_batch_loop(self) -> None:
+        """Background loop: drain input_batches into super().generate()."""
+        while not self._batcher_stop.is_set():
+            try:
+                self.send_batch()
+            except Exception:
+                logger.exception("send_batch failed; will retry")
+            # Wait for the poll interval or until stopped.
+            self._batcher_stop.wait(self._batcher_poll_interval)
+
+    def send_batch(self) -> None:
+        """Combine pending input_batches into one planar batch and dispatch it.
+
+        Runs on the background batcher thread. When the number of pending
+        call_ids in :attr:`_input_batches` reaches ``self._booked_requests``,
+        all pending items are flattened into a single batch, tagged with their
+        originating ``call_id`` in ``metadata``, passed to ``super().generate``,
+        and the results are split back out by ``call_id`` into
+        :attr:`_output_batches`.
+        """
+        start_time = time.monotonic()
+        # Snapshot the pending inputs under the lock.
+        with self._batcher_lock:
+            self._batch_started_at = start_time
+            self._expire_entries()
+            if not self._input_batches:
+                return
+            # Trigger when we have at least _booked_requests pending calls,
+            # or when there is only one call pending and no further bookings
+            # are expected (best-effort: avoids stalling a lone caller).
+            pending_count = len(self._input_batches)
+            if self._booked_requests > 0 and pending_count < self._booked_requests:
+                return
+            # Take ownership of the pending inputs.
+            pending = self._input_batches
+            self._input_batches = {}
+
+        # Build a planar batch preserving order, and remember which call_id
+        # each item belongs to so we can split results back out.
+        planar_batch: List[BatchInputItem] = []
+        for call_id, (_ts, items) in pending.items():
+            for item in items:
+                # Tag the item with its call_id in metadata so the backend
+                # round-trips it back to us on the output side.
+                tagged = copy.copy(item)
+                tagged.metadata = dict(item.metadata)
+                tagged.metadata["call_id"] = call_id
+                planar_batch.append(tagged)
+
+        if not planar_batch:
+            return
+
+        results = super().generate(planar_batch)
+
+        # Split results back out by call_id.
+        per_call: Dict[str, List[BatchOutputItem]] = {}
+        for out_item in results:
+            cid = out_item.metadata["call_id"]
+            if cid in per_call:
+                per_call[cid].append(out_item)
+            else:
+                per_call[cid] = [out_item]
+
+        now = time.monotonic()
+        with self._batcher_lock:
+            for cid, items in per_call.items():
+                if items:
+                    self._output_batches[cid] = (now, items)
+            self._last_batch_duration = time.monotonic() - start_time
+            self._batch_started_at = None
+
+    def _expire_entries(self) -> None:
+        """Drop expired input/output entries. Caller holds _batcher_lock."""
+        cutoff = time.monotonic() - self._batcher_entry_ttl
+        for store in (self._input_batches, self._output_batches):
+            for key in [k for k, (ts, _) in store.items() if ts < cutoff]:
+                del store[key]
 
     # -- batch generation -------------------------------------------------
 
     def _estimate_retry_after(self) -> float:
         """Estimate how many seconds until the in-flight batch completes."""
-        if self._last_batch_duration is not None:
-            # Use the most recent observed duration as the estimate.
-            elapsed = time.monotonic() - (self._batch_started_at or time.monotonic())
-            remaining = self._last_batch_duration - elapsed
-            return max(remaining, 1.0)
+        with self._batcher_lock:
+            if self._last_batch_duration is not None:
+                # Use the most recent observed duration as the estimate.
+                elapsed = time.monotonic() - (self._batch_started_at or time.monotonic() + 5.0)
+                remaining = self._last_batch_duration - elapsed
+                return max(remaining, self._default_batch_estimate)
         # No history yet: fall back to the configured default estimate.
         return self._default_batch_estimate
 
     def generate(self, batch: List[BatchInputItem]) -> List[BatchOutputItem]:
-        # Only one batch at a time. Try to acquire the batch lock without
-        # blocking so we can immediately report a Retry-After estimate to the
-        # caller instead of queueing behind the running batch.
-        if not self._batch_lock.acquire(blocking=False):
-            raise BatchBusyError(retry_after=self._estimate_retry_after())
+        """Enqueue a batch and block until the batcher thread produces results.
+
+        Each call gets a unique ``call_id`` (uuid4). The batch is stored in
+        :attr:`_input_batches` keyed by ``call_id`` with a monotonic timestamp
+        for expiration, and every :class:`BatchInputItem` is tagged with the
+        same ``call_id`` in its ``metadata`` dict. The method then polls
+        :attr:`_output_batches` for the matching ``call_id`` and returns the
+        results.
+        """
+        call_id = str(uuid.uuid4())
+        now = time.monotonic()
+        with self._batcher_lock:
+            self._input_batches[call_id] = (now, list(batch))
+
+        # Block until the batcher thread publishes results for this call_id.
+        poll = self._batcher_poll_interval
+        while not self._batcher_stop.is_set():
+            with self._batcher_lock:
+                entry = self._output_batches.pop(call_id, None)
+            if entry is not None:
+                _ts, results = entry
+                return results
+            time.sleep(poll)
+        # Shutting down: return whatever we can, or raise.
+        raise RuntimeError("CrownSuryaInferenceManager is shutting down")
+
+    @asynccontextmanager
+    async def booking(self):
+        """Async context manager to limit the number of concurrent API requests."""
+        # max_workers = crown_settings.SURYA_INFERENCE_MAX_WORKERS or 1
+        limit = crown_settings.SURYA_INFERENCE_MAX_WORKERS or settings.SURYA_INFERENCE_PARALLEL * 2
+
+        if self._booked_requests >= limit:
+            estimate = self._estimate_retry_after()
+            raise BatchBusyError(retry_after=estimate)
+
+        with self._batcher_lock:
+            self._booked_requests += 1
         try:
-            self._batch_running = True
-            self._batch_started_at = time.monotonic()
-            start = time.monotonic()
-            result = super().generate(batch)
-            self._last_batch_duration = time.monotonic() - start
-            return result
+            yield
         finally:
-            self._batch_running = False
-            self._batch_started_at = None
-            self._batch_lock.release()
+            with self._batcher_lock:
+                self._booked_requests -= 1
 
 
 __all__ = [

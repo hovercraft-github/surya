@@ -10,10 +10,11 @@ except RuntimeError:
 
 import portalocker
 from filelock import FileLock, Timeout
+import logging
 import logging.config
 import copy
 
-from fastapi import FastAPI, File, UploadFile, Query, Path, HTTPException
+from fastapi import FastAPI, File, UploadFile, Query, Path, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import argparse
@@ -55,6 +56,7 @@ from surya.table_rec.schema import TableCell, TableCol, TableResult, TableRow
 
 
 logger = get_logger()
+crown_logger = logging.getLogger("crown")
 
 LOGGING_CONFIG = {
     "version": 1,
@@ -79,6 +81,10 @@ LOGGING_CONFIG = {
         "surya": {
             # "handlers": ["console"],
             "level": "INFO",
+            "propagate": True,
+        },
+        "crown": {
+            "level": "DEBUG",
             "propagate": True,
         },
     },
@@ -107,8 +113,10 @@ def update_request_count(delta: int = 1) -> None:
             data["last_updated"] = perf_counter()
             _write_sentinel(backend_type, data)
     except Timeout:
-        pass
-
+        crown_logger.warning("update_request_count lock timed out")
+    except Exception as e:
+        crown_logger.error(f"update_request_count failure: {e}")
+        raise
 
 def get_request_count() -> tuple[int, float | None, int | None]:
     lock = FileLock(str(_lock_path(backend_type)))
@@ -129,13 +137,13 @@ def get_request_count() -> tuple[int, float | None, int | None]:
 
 
 def cleanup():
-    logger.info("Cleaning up resources...")
+    crown_logger.info("Cleaning up resources...")
     lock = FileLock(str(_lock_path(backend_type)))
     try:
         with lock.acquire(timeout=1):
             sentinel = _read_sentinel(backend_type)
             if not sentinel or not sentinel.get("cleanup_kind"):
-                logger.info("No active server detected; skipping cleanup.")
+                crown_logger.info("No active server detected; skipping cleanup.")
                 return
             cleanup_id = sentinel.get("cleanup_id")
             pid = sentinel.get("pid")
@@ -147,7 +155,7 @@ def cleanup():
         pass
     finally:
         _delete_sentinel(backend_type)
-    logger.info("Cleanup complete.")
+    crown_logger.info("Cleanup complete.")
 
 
 async def resource_management_loop():
@@ -161,7 +169,7 @@ async def resource_management_loop():
                 and last_updated is not None
                 and (perf_counter() - last_updated) > timer
             ):
-                logger.warning(
+                crown_logger.warning(
                     f"No requests in the last {int(timer)} seconds; stopping inference server to save resources."
                 )
                 cleanup()
@@ -256,7 +264,7 @@ app.add_middleware(
 
 
 @app.post("/ocr/full/")
-async def ocr_full_page(file: UploadFile = File(...),
+async def ocr_full_page(request: Request, file: UploadFile = File(...),
     dpi: int | None = Query(
         default=300,
         ge=72,
@@ -307,7 +315,7 @@ async def ocr_full_page(file: UploadFile = File(...),
     For small, easy pages only.
     """
     try:
-        logger.info(
+        crown_logger.info(
             f"Received file: {file.filename}, content_type: {file.content_type}"
         )
         recognizer = RecognitionPredictor(inference_manager)
@@ -319,59 +327,66 @@ async def ocr_full_page(file: UploadFile = File(...),
         ):
             inference_manager.stop()
             inference_manager.start()
-        update_request_count()
-        start_time = perf_counter()
-        image = await load_and_preprocess_image_async(
-            file,
-            dpi=dpi,
-            trim=trim,
-            crop=crop,
-            crop_left=crop_left,
-            crop_right=crop_right,
-            crop_top=crop_top,
-            crop_bottom=crop_bottom,
-        )
-        # Use full_page=True for direct HTML extraction with HIGH_ACCURACY_BBOX_PROMPT
-        predictions = await asyncio.to_thread(recognizer, [image], full_page=True)
+        async with inference_manager.booking():
+            update_request_count()
+            try:
+                start_time = perf_counter()
+                image = await load_and_preprocess_image_async(
+                    file,
+                    dpi=dpi,
+                    trim=trim,
+                    crop=crop,
+                    crop_left=crop_left,
+                    crop_right=crop_right,
+                    crop_top=crop_top,
+                    crop_bottom=crop_bottom,
+                )
+                # Use full_page=True for direct HTML extraction with HIGH_ACCURACY_BBOX_PROMPT
+                predictions = await asyncio.to_thread(recognizer, [image], full_page=True)
 
-        if not predictions:
-            return {"html": "", "blocks": []}
+                if not predictions:
+                    return {"html": "", "blocks": []}
 
-        # Build structured block list
-        blocks_data = []
-        for prediction in predictions:
-            for block in prediction.blocks:
-                if block.html:  # Skip empty/skipped blocks
-                    blocks_data.append(
-                        {
-                            "label": block.label,
-                            "html": block.html,
-                            "polygon": block.polygon,
-                            "confidence": block.confidence,
-                            "reading_order": block.reading_order,
-                        }
+                # Build structured block list
+                blocks_data = []
+                for prediction in predictions:
+                    for block in prediction.blocks:
+                        if block.html:  # Skip empty/skipped blocks
+                            blocks_data.append(
+                                {
+                                    "label": block.label,
+                                    "html": block.html,
+                                    "polygon": block.polygon,
+                                    "confidence": block.confidence,
+                                    "reading_order": block.reading_order,
+                                }
+                            )
+
+                # Assemble full-page HTML by combining all blocks in reading order
+                html_parts = []
+                for block in blocks_data:
+                    # Each block already has HTML with proper structure from the model
+                    html_parts.append(
+                        f'<div class="block" data-label="{block["label"]}">{block["html"]}</div>'
                     )
 
-        # Assemble full-page HTML by combining all blocks in reading order
-        html_parts = []
-        for block in blocks_data:
-            # Each block already has HTML with proper structure from the model
-            html_parts.append(
-                f'<div class="block" data-label="{block["label"]}">{block["html"]}</div>'
-            )
-
-        full_html = '<div id="ocr-page">' + "\n".join(html_parts) + "</div>"
-        end_time = perf_counter()
-        logger.info(
-            f"OCR completed for {file.filename}, extracted {len(blocks_data)} blocks in {end_time - start_time:.2f} seconds."
-        )
-        return {
-            "html": full_html,
-            "blocks": blocks_data,
-            "page_bbox": predictions[0].image_bbox if predictions else [],
-        }
+                full_html = '<div id="ocr-page">' + "\n".join(html_parts) + "</div>"
+                end_time = perf_counter()
+                crown_logger.info(
+                    f"OCR completed for {file.filename}, extracted {len(blocks_data)} blocks in {end_time - start_time:.2f} seconds."
+                )
+                if await request.is_disconnected():
+                    crown_logger.warning(f"Client disconnected before OCR response for {file.filename}.")
+                    return {"blocks": [], "html": ""}
+                return {
+                    "html": full_html,
+                    "blocks": blocks_data,
+                    "page_bbox": predictions[0].image_bbox if predictions else [],
+                }
+            finally:
+                update_request_count(delta=-1)
     except BatchBusyError as e:
-        logger.warning(f"Batch busy for {file.filename}: {e}")
+        crown_logger.warning(f"Batch busy for {file.filename}: {e}")
         raise HTTPException(
             status_code=429,
             detail=str(e),
@@ -379,12 +394,10 @@ async def ocr_full_page(file: UploadFile = File(...),
         )
     except Exception as e:
         msg = str(e)
-        logger.error(f"OCR failed for {file.filename}: {msg}")
+        crown_logger.error(f"OCR failed for {file.filename}: {msg}")
         raise HTTPException(
             status_code=500, detail=msg or "An error occurred during OCR processing."
         )
-    finally:
-        update_request_count(delta=-1)
 
 def text_recognition(
     img: Image.Image,
@@ -482,7 +495,7 @@ async def table_recognition_async(
 
 
 @app.post("/ocr/block/")
-async def ocr_blocks(file: UploadFile = File(...),
+async def ocr_blocks(request: Request, file: UploadFile = File(...),
     dpi: int | None = Query(
         default=300,
         ge=72,
@@ -531,7 +544,7 @@ async def ocr_blocks(file: UploadFile = File(...),
     that should be filtered out (like images), also is more accurate for complex table layouts.
     """
     try:
-        logger.info(
+        crown_logger.info(
             f"Received file: {file.filename}, content_type: {file.content_type}"
         )
         _, last_updated, port = get_request_count()
@@ -542,74 +555,81 @@ async def ocr_blocks(file: UploadFile = File(...),
         ):
             inference_manager.stop()
             inference_manager.start()
-        update_request_count()
-        start_time = perf_counter()
-        image = await load_and_preprocess_image_async(
-            file,
-            dpi=dpi,
-            trim=trim,
-            crop=crop,
-            crop_left=crop_left,
-            crop_right=crop_right,
-            crop_top=crop_top,
-            crop_bottom=crop_bottom,
-        )
-        layout_predictor = LayoutPredictor(inference_manager)
-        layouts = await asyncio.to_thread(layout_predictor, [image])
-        if not layouts or not layouts[0].bboxes:
-            return {"html": "", "blocks": []}
-        width, height = image.size
-        margin = int(max(width, height) / 200)  # Dynamic margin based on image size (e.g., 2px for 1000px image)
-        for block in layouts[0].bboxes:
-            poligon_expand(block.polygon, margin=margin)
-        # Run text and table recognition sequentially (texts first, then tables)
-        # via asyncio.to_thread so each blocking inference call yields the event loop.
-        texts, text_bboxes = await text_recognition_async(image, layouts)
-        tables, table_bboxes = await table_recognition_async(image, layouts[0], mode="td")
-        blocks_data = []
-        for pred in texts:
-            for block in pred.blocks:
-                if block.html:  # Skip empty/skipped blocks
-                    blocks_data.append(
-                        {
-                            "label": block.label,
-                            "html": block.html,
-                            "polygon": block.polygon,
-                            "confidence": block.confidence,
-                            "reading_order": block.reading_order,
-                        }
-                    )
-        for table, bbox in zip(tables, table_bboxes):
-            if table.html:  # Skip empty/skipped tables
-                blocks_data.append(
-                    {
-                        "label": "Table",
-                        "html": table.html,
-                        "rows": table.rows,
-                        "cols": table.cols,
-                        "cells": table.cells,
-                        "bbox": bbox,
-                    }
+        async with inference_manager.booking():
+            update_request_count()
+            try:
+                start_time = perf_counter()
+                image = await load_and_preprocess_image_async(
+                    file,
+                    dpi=dpi,
+                    trim=trim,
+                    crop=crop,
+                    crop_left=crop_left,
+                    crop_right=crop_right,
+                    crop_top=crop_top,
+                    crop_bottom=crop_bottom,
                 )
+                layout_predictor = LayoutPredictor(inference_manager)
+                layouts = await asyncio.to_thread(layout_predictor, [image])
+                if not layouts or not layouts[0].bboxes:
+                    return {"html": "", "blocks": []}
+                width, height = image.size
+                margin = int(max(width, height) / 200)  # Dynamic margin based on image size (e.g., 2px for 1000px image)
+                for block in layouts[0].bboxes:
+                    poligon_expand(block.polygon, margin=margin)
+                # Run text and table recognition sequentially (texts first, then tables)
+                # via asyncio.to_thread so each blocking inference call yields the event loop.
+                texts, text_bboxes = await text_recognition_async(image, layouts)
+                tables, table_bboxes = await table_recognition_async(image, layouts[0], mode="td")
+                blocks_data = []
+                for pred in texts:
+                    for block in pred.blocks:
+                        if block.html:  # Skip empty/skipped blocks
+                            blocks_data.append(
+                                {
+                                    "label": block.label,
+                                    "html": block.html,
+                                    "polygon": block.polygon,
+                                    "confidence": block.confidence,
+                                    "reading_order": block.reading_order,
+                                }
+                            )
+                for table, bbox in zip(tables, table_bboxes):
+                    if table.html:  # Skip empty/skipped tables
+                        blocks_data.append(
+                            {
+                                "label": "Table",
+                                "html": table.html,
+                                "rows": table.rows,
+                                "cols": table.cols,
+                                "cells": table.cells,
+                                "bbox": bbox,
+                            }
+                        )
 
-        html_parts = []
-        for block in blocks_data:
-            # Each block already has HTML with proper structure from the model
-            html_parts.append(
-                f'<div class="block" data-label="{block["label"]}">{block["html"]}</div>'
-            )
+                html_parts = []
+                for block in blocks_data:
+                    # Each block already has HTML with proper structure from the model
+                    html_parts.append(
+                        f'<div class="block" data-label="{block["label"]}">{block["html"]}</div>'
+                    )
 
-        full_html = '<div id="ocr-page">' + "\n".join(html_parts) + "</div>"
-        end_time = perf_counter()
-        logger.info(
-            f"OCR completed for {file.filename}, extracted {len(blocks_data)} blocks in {end_time - start_time:.2f} seconds."
-        )
-        return {
-            "blocks": blocks_data,
-            "html": full_html,
-        }
+                full_html = '<div id="ocr-page">' + "\n".join(html_parts) + "</div>"
+                end_time = perf_counter()
+                crown_logger.info(
+                    f"OCR completed for {file.filename}, extracted {len(blocks_data)} blocks in {end_time - start_time:.2f} seconds."
+                )
+                if await request.is_disconnected():
+                    crown_logger.warning(f"Client disconnected before OCR response for {file.filename}.")
+                    return {"blocks": [], "html": ""}
+                return {
+                    "blocks": blocks_data,
+                    "html": full_html,
+                }
+            finally:
+                update_request_count(delta=-1)
     except BatchBusyError as e:
-        logger.warning(f"Batch busy for {file.filename}: {e}")
+        crown_logger.warning(f"Batch busy for {file.filename}: {e}")
         raise HTTPException(
             status_code=429,
             detail=str(e),
@@ -617,12 +637,10 @@ async def ocr_blocks(file: UploadFile = File(...),
         )
     except Exception as e:
         msg = str(e)
-        logger.error(f"OCR failed for {file.filename}: {msg}")
+        crown_logger.error(f"OCR failed for {file.filename}: {msg}")
         raise HTTPException(
             status_code=500, detail=msg or "An error occurred during OCR processing."
         )
-    finally:
-        update_request_count(delta=-1)
 
 
 # Run the application
