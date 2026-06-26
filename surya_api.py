@@ -286,25 +286,25 @@ async def ocr_full_page(request: Request, file: UploadFile = File(...),
     crop_left: float = Query(
         default=0.0,
         ge=0.0,
-        le=50.0,
+        le=99.0,
         description="Optional percent to crop from the LEFT side of the image before OCR. Overrides the 'crop' value for the left side. 0 means no cropping, 50 means crop half of the image width, 0.2 .. 0.5 recommended value."
         ),
     crop_right: float = Query(
         default=0.0,
         ge=0.0,
-        le=50.0,
+        le=99.0,
         description="Optional percent to crop from the RIGHT side of the image before OCR. Overrides the 'crop' value for the right side. 0 means no cropping, 50 means crop half of the image width, 0.2 .. 0.5 recommended value."
         ),
     crop_top: float = Query(
         default=0.0,
         ge=0.0,
-        le=50.0,
+        le=99.0,
         description="Optional percent to crop from the TOP side of the image before OCR. Overrides the 'crop' value for the top side. 0 means no cropping, 50 means crop half of the image height, 0.2 .. 0.5 recommended value."
         ),
     crop_bottom: float = Query(
         default=0.0,
         ge=0.0,
-        le=50.0,
+        le=99.0,
         description="Optional percent to crop from the BOTTOM side of the image before OCR. Overrides the 'crop' value for the bottom side. 0 means no cropping, 50 means crop half of the image height, 0.2 .. 0.5 recommended value."
         ),
     ):
@@ -318,6 +318,11 @@ async def ocr_full_page(request: Request, file: UploadFile = File(...),
         crown_logger.info(
             f"Received file: {file.filename}, content_type: {file.content_type}"
         )
+        if 100.0 - crop_left - crop_right < 1.0 or 100.0 - crop_top - crop_bottom < 1.0:
+            raise HTTPException(
+                status_code=400,
+                detail="Inconsistent crop values",
+            )
         recognizer = RecognitionPredictor(inference_manager)
         _, last_updated, port = get_request_count()
         if (
@@ -517,25 +522,25 @@ async def ocr_blocks(request: Request, file: UploadFile = File(...),
     crop_left: float = Query(
         default=0.0,
         ge=0.0,
-        le=50.0,
+        le=99.0,
         description="Optional percent to crop from the LEFT side of the image before OCR. Overrides the 'crop' value for the left side. 0 means no cropping, 50 means crop half of the image width, 0.2 .. 0.5 recommended value."
         ),
     crop_right: float = Query(
         default=0.0,
         ge=0.0,
-        le=50.0,
+        le=99.0,
         description="Optional percent to crop from the RIGHT side of the image before OCR. Overrides the 'crop' value for the right side. 0 means no cropping, 50 means crop half of the image width, 0.2 .. 0.5 recommended value."
         ),
     crop_top: float = Query(
         default=0.0,
         ge=0.0,
-        le=50.0,
+        le=99.0,
         description="Optional percent to crop from the TOP side of the image before OCR. Overrides the 'crop' value for the top side. 0 means no cropping, 50 means crop half of the image height, 0.2 .. 0.5 recommended value."
         ),
     crop_bottom: float = Query(
         default=0.0,
         ge=0.0,
-        le=50.0,
+        le=99.0,
         description="Optional percent to crop from the BOTTOM side of the image before OCR. Overrides the 'crop' value for the bottom side. 0 means no cropping, 50 means crop half of the image height, 0.2 .. 0.5 recommended value."
         ),
     ):
@@ -547,6 +552,11 @@ async def ocr_blocks(request: Request, file: UploadFile = File(...),
         crown_logger.info(
             f"Received file: {file.filename}, content_type: {file.content_type}"
         )
+        if 100.0 - crop_left - crop_right < 1.0 or 100.0 - crop_top - crop_bottom < 1.0:
+            raise HTTPException(
+                status_code=400,
+                detail="Inconsistent crop values",
+            )
         _, last_updated, port = get_request_count()
         if (
             last_updated is None
