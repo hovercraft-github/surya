@@ -22,7 +22,8 @@
                 // "SURYA_GUIDED_TABLE_REC": "true",
                 // "SURYA_MAX_TOKENS_FULL_PAGE": "262144",
                 // "SURYA_INFERENCE_CTX_PER_SLOT": "262144",
-                "LLAMA_CPP_NGL": "999"
+                "LLAMA_CPP_NGL": "999",
+                "OLLAMA_URL": "http://localhost:11434"
             },
         },
         {

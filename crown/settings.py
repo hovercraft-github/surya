@@ -40,10 +40,10 @@ class CrownSettings(BaseSettings):
     # env vars. These are only consumed by CrownLlamaCppBackend.start().
     #
     # -b: prompt-processing batch size. Larger helps the heavy vision
-    # prefill. 4096 is a good default for surya-2's image inputs.
-    LLAMA_CPP_BATCH: int = 4096
+    # prefill. 2048 is a good default for surya-2's image inputs.
+    LLAMA_CPP_BATCH: int = 2048
     # -ub: micro-batch (ubatch) size for prompt eval. Match -b by default.
-    LLAMA_CPP_UBATCH: int = 4096
+    LLAMA_CPP_UBATCH: int = 512
     # -t: CPU threads for the non-offloaded parts of the graph. None =
     # max(1, cpu_count // 2). Set explicitly to pin a specific count.
     LLAMA_CPP_THREADS: Optional[int] = None
@@ -67,6 +67,7 @@ class CrownSettings(BaseSettings):
     LLAMA_CPP_CPU_RANGE: Optional[str] = None
     # --cpu-strict 1: strict CPU affinity (only meaningful with --cpu-range).
     LLAMA_CPP_CPU_STRICT: bool = False
+    OLLAMA_URL: Optional[str] = None
 
     class Config:
         env_file = find_dotenv("local.env")

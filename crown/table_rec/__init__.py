@@ -1,6 +1,9 @@
+import base64
 from typing import List, Optional
 
 from PIL import Image
+from io import BytesIO
+import requests
 
 from surya.table_rec import TableRecPredictor, _polygon_from_bbox, _intersect_bbox, logger
 from surya.table_rec.schema import TableCell, TableCol, TableResult, TableRow
@@ -11,6 +14,9 @@ from surya.inference import SuryaInferenceManager, get_default_manager
 from surya.logging import get_logger
 from surya.settings import settings
 from surya.inference.parsers import clean_block_html, denorm_bbox, parse_table_rec
+
+from crown.settings import crown_settings
+
 
 BLOCK_PROMPT_TBL = ("OCR this image to HTML Each block is a div with data-label and data-bbox "
     "(x0 y0 x1 y1, normalized 0-1000)."
@@ -44,6 +50,49 @@ TABLE_REC_JSON_SCHEMA_EXT = {
     },
 }
 
+GLMOCR_MODEL = "glm-ocr:latest"
+GLMOCR_PROMPT = (
+    "Extract all text from this image. "
+    "Format any tables as HTML tables (<table><thead>...). "
+)
+    # "Ensure all keys in the extracted JSON contain unique values. "
+    # "Deduplicate any overlapping line items in the source image."
+    # "Preserve all numbers, units, and special characters exactly. "
+
+def call_glm_ocr(image: Image.Image, prompt: str | None = None, num_predict: int | None = None) -> dict:
+    """Call glm-ocr via Ollama chat API and return the full response JSON."""
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    img_b64 = base64.b64encode(buffered.getvalue()).decode()
+    OLLAMA_URL = crown_settings.OLLAMA_URL
+    if not prompt:
+        prompt = GLMOCR_PROMPT
+
+    payload = {
+        "model": GLMOCR_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+                "images": [img_b64],
+            }
+        ],
+        "stream": False,
+        "options": {"temperature": 0.2,
+                    "stop": ["\n", "\n\n", " \n \n \n", "---"],
+                    "num_predict": 2048,
+                    "repeat_penalty": 1.4
+                    },
+    }
+
+    if num_predict is not None:
+        payload["options"]["num_predict"] = num_predict
+
+    r = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=300)
+    r.raise_for_status()
+
+    result = r.json()
+    return result
 
 class TableExtPredictor(TableRecPredictor):
     def __init__(self, manager: Optional[SuryaInferenceManager] = None):
@@ -59,6 +108,25 @@ class TableExtPredictor(TableRecPredictor):
         HTML is preferred. `counts` (one per image) shapes max_tokens."""
         if not images:
             return []
+        if crown_settings.OLLAMA_URL:
+            results = []
+            for img in images:
+                result = call_glm_ocr(img)
+                w, h = img.size
+                page_bbox = [0, 0, float(w), float(h)]
+                results.append(
+                    TableResult(
+                        rows=[],
+                        cols=[],
+                        cells=[],
+                        image_bbox=page_bbox,
+                        raw=None,
+                        html=result.get("message", {}).get("content", ""),
+                        mode="full",
+                        error=False,
+                    )
+                )
+            return results
         manager = self.manager or get_default_manager()
         if counts is None:
             counts = [0] * len(images)
