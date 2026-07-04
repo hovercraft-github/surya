@@ -51,6 +51,16 @@ def poligon_expand(polygon: list[list[float]], margin: float):
     polygon[3][1] += margin  # y_max
 
 
+def bbox_expand(bbox: tuple[int, ...], margin: int) -> tuple[int, int, int, int]:
+    """
+    Expands a bounding box by a certain margin.
+                bbox = [x_min, y_min, x_max, y_max]
+    """
+    if len(bbox) != 4:
+        return bbox
+    return (bbox[0] - margin, bbox[1], bbox[2] + margin + margin, bbox[3] + margin)
+
+
 def image_white_cnt_points(image: Image.Image, white_threshold: int = 200) -> int:
     """Counts the number of white points in b/w image."""
     import numpy as np

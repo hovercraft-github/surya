@@ -68,6 +68,8 @@ class CrownSettings(BaseSettings):
     # --cpu-strict 1: strict CPU affinity (only meaningful with --cpu-range).
     LLAMA_CPP_CPU_STRICT: bool = False
     OLLAMA_URL: Optional[str] = None
+    OLLAMA_URL_LAYOUT: Optional[str] = None
+    DEBUG_FOLDER: Optional[str] = None
 
     class Config:
         env_file = find_dotenv("local.env")

@@ -19,13 +19,14 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 import argparse
 from time import perf_counter
-from PIL import Image
+from PIL import Image, ImageOps
 
 import asyncio
 
-from crown.table_rec import TableExtPredictor
-from crown.utils import crop_by_percent, crop_by_side_percent, get_page_image, trim_empty_background
+from crown.table_rec import TableExtPredictor, reconstruct_html_table
+from crown.utils import bbox_expand, crop_by_percent, crop_by_side_percent, get_page_image, trim_empty_background
 from crown.utils import poligon_expand
+from crown.settings import crown_settings
 from surya.layout.schema import LayoutBox, LayoutResult
 from surya.recognition.schema import PageOCRResult
 from surya.settings import settings
@@ -247,6 +248,9 @@ def load_and_preprocess_image(
         )
     elif crop > 0.0:
         image = crop_by_percent(image, crop)
+    if crown_settings.DEBUG_FOLDER:
+        os.makedirs(crown_settings.DEBUG_FOLDER, exist_ok=True)
+        image.save(f"{crown_settings.DEBUG_FOLDER}/debug_preprocessed.png")
     return image
 
 
@@ -430,13 +434,21 @@ def text_recognition(
 def table_recognition(
     img: Image.Image,
     layout: LayoutResult,
+    margin: int,
     mode: str
 ) -> tuple[list[TableResult], list[tuple[int, ...]]]:
     tables = [b for b in layout.bboxes if b.label in ("Table", "Table-Of-Contents")]
     if not tables:
         return [], []
-    table_bboxes = [tuple(int(c) for c in b.bbox) for b in tables]
-    table_imgs = [img.crop(b) for b in table_bboxes]
+    pixels = img.getcolors(maxcolors=img.size[0] * img.size[1])
+    bg_color = max(pixels, key=lambda x: x[0])[1] if pixels else (255, 255, 255)
+    table_bboxes = [bbox_expand(tuple(int(c) for c in b.bbox), margin) for b in tables]
+    table_imgs = [ImageOps.expand(img.crop(b), border=margin, fill=bg_color) for b in table_bboxes]
+    for i, table_img in enumerate(table_imgs):
+        if table_img.mode != "RGB":
+            table_imgs[i] = table_img.convert("RGB")
+        if crown_settings.DEBUG_FOLDER:
+            table_img.save(f"{crown_settings.DEBUG_FOLDER}/debug_table_{i}.png")  # Debug: Save each table image for inspection
     table_counts = [b.count for b in tables]
     table_rec_predictor = TableExtPredictor(inference_manager)
     table_preds = table_rec_predictor.predict_flexible(table_imgs, counts=table_counts, mode="td")
@@ -449,6 +461,8 @@ def table_recognition(
                 pred.cells = pred2.cells
                 pred.cols = pred2.cols
                 pred.rows = pred2.rows
+                pred.raw = pred2.raw
+                # pred.html = reconstruct_html_table(pred)
     return table_preds, table_bboxes
 
 
@@ -491,12 +505,13 @@ async def load_and_preprocess_image_async(
 async def table_recognition_async(
     img: Image.Image,
     layout: LayoutResult,
+    margin: int,
     mode: str,
 ) -> tuple[list[TableResult], list[tuple[int, ...]]]:
     """Async wrapper for :func:`table_recognition` that offloads the blocking
     inference work to a worker thread via :func:`asyncio.to_thread` so the
     event loop stays responsive while the table recognizer runs."""
-    return await asyncio.to_thread(table_recognition, img, layout, mode)
+    return await asyncio.to_thread(table_recognition, img, layout, margin, mode)
 
 
 @app.post("/ocr/block/")
@@ -585,12 +600,13 @@ async def ocr_blocks(request: Request, file: UploadFile = File(...),
                     return {"html": "", "blocks": []}
                 width, height = image.size
                 margin = int(max(width, height) / 200)  # Dynamic margin based on image size (e.g., 2px for 1000px image)
+                layout = copy.deepcopy(layouts[0])
                 for block in layouts[0].bboxes:
                     poligon_expand(block.polygon, margin=margin)
                 # Run text and table recognition sequentially (texts first, then tables)
                 # via asyncio.to_thread so each blocking inference call yields the event loop.
                 texts, text_bboxes = await text_recognition_async(image, layouts)
-                tables, table_bboxes = await table_recognition_async(image, layouts[0], mode="td")
+                tables, table_bboxes = await table_recognition_async(image, layout, margin, mode="td")
                 blocks_data = []
                 for pred in texts:
                     for block in pred.blocks:
@@ -610,6 +626,7 @@ async def ocr_blocks(request: Request, file: UploadFile = File(...),
                             {
                                 "label": "Table",
                                 "html": table.html,
+                                "html_alt": table.raw,
                                 "rows": table.rows,
                                 "cols": table.cols,
                                 "cells": table.cells,

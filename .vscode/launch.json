@@ -23,7 +23,10 @@
                 // "SURYA_MAX_TOKENS_FULL_PAGE": "262144",
                 // "SURYA_INFERENCE_CTX_PER_SLOT": "262144",
                 "LLAMA_CPP_NGL": "999",
-                "OLLAMA_URL": "http://localhost:11434"
+                // "OLLAMA_URL": "http://localhost:11434"
+                "OLLAMA_URL_LAYOUT": "http://localhost:11434",
+                // "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ"
+                "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ/Пример2/"
             },
         },
         {
@@ -39,7 +42,7 @@
                 "SURYA_INFERENCE_CTX_SIZE": "100000",
                 "SURYA_INFERENCE_PARALLEL": "2",
                 "SURYA_INFERENCE_CTX_PER_SLOT": "50000",
-                "LLAMA_CPP_NGL": "-1"
+                "LLAMA_CPP_NGL": "-1",
             },
             "args": ["--remote-debug", "--port", "8521"]
         }

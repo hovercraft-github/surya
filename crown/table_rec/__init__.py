@@ -1,9 +1,13 @@
 import base64
-from typing import List, Optional
+from html.parser import HTMLParser
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from PIL import Image
 from io import BytesIO
 import requests
+import json
+
 
 from surya.table_rec import TableRecPredictor, _polygon_from_bbox, _intersect_bbox, logger
 from surya.table_rec.schema import TableCell, TableCol, TableResult, TableRow
@@ -58,6 +62,14 @@ GLMOCR_PROMPT = (
     # "Ensure all keys in the extracted JSON contain unique values. "
     # "Deduplicate any overlapping line items in the source image."
     # "Preserve all numbers, units, and special characters exactly. "
+GLMOCR_PROMPT_LAYOUT = (
+    "Detect the bounding boxes of all individual table cells in this image. "
+    "Please pinpoint the bounding box [[x1,y1,x2,y2], ...] in the image for every cell, matching their text content."
+    #     "Extract all text from this image. "
+    #     "Format any tables as HTML tables (<table><thead>...). "
+    #     "Preserve the original layout of the text and tables as much as possible. "
+)
+
 
 def call_glm_ocr(image: Image.Image, prompt: str | None = None, num_predict: int | None = None) -> dict:
     """Call glm-ocr via Ollama chat API and return the full response JSON."""
@@ -65,6 +77,10 @@ def call_glm_ocr(image: Image.Image, prompt: str | None = None, num_predict: int
     image.save(buffered, format="PNG")
     img_b64 = base64.b64encode(buffered.getvalue()).decode()
     OLLAMA_URL = crown_settings.OLLAMA_URL
+    if not OLLAMA_URL:
+        OLLAMA_URL = crown_settings.OLLAMA_URL_LAYOUT
+    if not OLLAMA_URL:
+        raise ValueError("OLLAMA_URL or OLLAMA_URL_LAYOUT must be set in crown_settings.")
     if not prompt:
         prompt = GLMOCR_PROMPT
 
@@ -78,10 +94,11 @@ def call_glm_ocr(image: Image.Image, prompt: str | None = None, num_predict: int
             }
         ],
         "stream": False,
-        "options": {"temperature": 0.2,
-                    "stop": ["\n", "\n\n", " \n \n \n", "---"],
+        "options": {"temperature": 0.0,
+                    # "stop": ["\n", "\n\n", " \n \n \n", "---"],
+                    "stop": ["\n\n", " \n \n \n", "---", "\n```\n```", "``````"],
                     "num_predict": 2048,
-                    "repeat_penalty": 1.4
+                    # "repeat_penalty": 1.4
                     },
     }
 
@@ -187,7 +204,6 @@ class TableExtPredictor(TableRecPredictor):
     def predict_simple(self, images: List[Image.Image]) -> List[TableResult]:
         if not images:
             return []
-        manager = self.manager or get_default_manager()
         guided = TABLE_REC_JSON_SCHEMA_EXT if settings.SURYA_GUIDED_TABLE_REC else None
         batch = [
             BatchInputItem(
@@ -196,15 +212,36 @@ class TableExtPredictor(TableRecPredictor):
                 prompt_type=PROMPT_TYPE_TABLE_REC,
                 max_tokens=settings.SURYA_MAX_TOKENS_TABLE_REC,
                 guided_json=guided,
+                metadata={"image_index": i},
             )
-            for img in images
+            for i, img in enumerate(images)
         ]
+        glm_results: dict[int, str] = {}
+        if crown_settings.OLLAMA_URL_LAYOUT:
+            for item in batch:
+                result = call_glm_ocr(item.image, prompt=GLMOCR_PROMPT_LAYOUT)
+                content = str(result.get("message", {}).get("content", ""))
+                if "```json" in content or content.startswith("[["):
+                    content = ""
+                if "```table" in content:
+                    content = content.split("```table", 1)[-1].rsplit("```", 1)[0].strip()
+                # if not is_valid_html(content):
+                #     content = ""
+                glm_results[item.metadata["image_index"]] = content
+                if crown_settings.DEBUG_FOLDER:
+                    debug_path = Path(crown_settings.DEBUG_FOLDER) / "glm_ocr_layout.json"
+                    with open(debug_path, "w", encoding="utf-8") as f:
+                        json.dump(result, f, ensure_ascii=False, indent=2)
+        manager = self.manager or get_default_manager()
         outputs = manager.generate(batch)
 
         results: List[TableResult] = []
-        for img, out in zip(images, outputs):
+        for out in outputs:
+            ix = out.metadata["image_index"]
+            img = batch[ix].image
             w, h = img.size
             page_bbox = [0, 0, float(w), float(h)]
+            html = glm_results.get(ix)
             if out.error or not out.raw:
                 results.append(
                     TableResult(
@@ -212,7 +249,7 @@ class TableExtPredictor(TableRecPredictor):
                         cols=[],
                         cells=[],
                         image_bbox=page_bbox,
-                        raw=out.raw,
+                        raw=html,
                         mode="simple",
                         error=True,
                     )
@@ -230,7 +267,7 @@ class TableExtPredictor(TableRecPredictor):
                         cols=[],
                         cells=[],
                         image_bbox=page_bbox,
-                        raw=out.raw,
+                        raw=html,
                         mode="simple",
                         error=True,
                     )
@@ -270,9 +307,232 @@ class TableExtPredictor(TableRecPredictor):
                     cols=cols,
                     cells=cells,
                     image_bbox=page_bbox,
-                    raw=out.raw,
+                    raw=html,
                     mode="simple",
                     error=False,
                 )
             )
         return results
+
+
+# ---------------------------------------------------------------------------
+# HTML table reconstruction from the spatial grid
+# ---------------------------------------------------------------------------
+
+def _attr_get(obj, key, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
+def _bbox_of(obj):
+    b = _attr_get(obj, "bbox")
+    return list(b) if b is not None else None
+
+
+class _TableCellParser(HTMLParser):
+    """Parse a <table> HTML fragment into rows of cells.
+
+    Each cell is a dict with keys: text, rowspan, colspan, header.
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.rows: List[List[dict]] = []
+        self._cur: Optional[dict] = None
+        self._buf: List[str] = []
+        self._in_cell = False
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "tr":
+            self.rows.append([])
+        elif tag in ("td", "th"):
+            self._in_cell = True
+            self._buf = []
+            try:
+                rs = int(a.get("rowspan", "1") or 1)
+            except (TypeError, ValueError):
+                rs = 1
+            try:
+                cs = int(a.get("colspan", "1") or 1)
+            except (TypeError, ValueError):
+                cs = 1
+            self._cur = {
+                "rowspan": max(1, rs),
+                "colspan": max(1, cs),
+                "header": tag == "th",
+                "text": "",
+            }
+        elif tag == "br" and self._in_cell:
+            self._buf.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in ("td", "th") and self._cur is not None:
+            self._cur["text"] = "".join(self._buf).strip()
+            if self.rows:
+                self.rows[-1].append(self._cur)
+            self._cur = None
+            self._in_cell = False
+
+    def handle_data(self, data):
+        if self._in_cell:
+            self._buf.append(data)
+
+
+def _parse_html_table(html: str):
+    """Return (header_row_count, rows) from an HTML <table> string."""
+    p = _TableCellParser()
+    p.feed(html or "")
+    header_rows = 0
+    for row in p.rows:
+        if row and all(c.get("header") for c in row):
+            header_rows += 1
+        else:
+            break
+    return header_rows, p.rows
+
+
+def _grid_dims_from_spatial(rows: Sequence, cols: Sequence) -> Tuple[int, int]:
+    """Return (n_rows, n_cols) from the spatial row/col bands."""
+    row_b = sorted(
+        [b for b in (_bbox_of(r) for r in rows) if b is not None],
+        key=lambda b: b[1],
+    )
+    col_b = sorted(
+        [b for b in (_bbox_of(c) for c in cols) if b is not None],
+        key=lambda b: b[0],
+    )
+    return len(row_b), len(col_b)
+
+
+def reconstruct_html_table(
+    result: TableResult | Dict[str, Any],
+    fill_text: bool = True,
+    border: int = 1,
+) -> str:
+    """Reconstruct a proper rectangular ``<table>`` from a table-rec result.
+
+    The spatial grid (``rows`` / ``cols`` / ``cells``) is treated as ground
+    truth for the table dimensions. The original ``html`` (when present)
+    supplies the cell text and the *intended* colspan/rowspan values, but its
+    placement is broken — so we re-lay every cell into a clean ``R x C`` grid
+    using the standard HTML cell-placement algorithm (skipping positions
+    already occupied by rowspans), then fill any remaining holes with empty
+    cells. Hole filling runs **right-to-left, bottom-to-top** so trailing
+    gaps close against the rightmost placed cell.
+
+    Args:
+        result: dict (or TableResult) with rows/cols/cells and optionally
+            ``html``.
+        fill_text: pull text from ``result['html']`` when available.
+        border: value for the ``border`` attribute of the emitted table.
+
+    Returns:
+        HTML string for a rectangular ``<table>`` with no broken spans.
+    """
+    rows = _attr_get(result, "rows") or []
+    cols = _attr_get(result, "cols") or []
+    html = _attr_get(result, "html")
+
+    n_rows, n_cols = _grid_dims_from_spatial(rows, cols)
+
+    # If we have no spatial bands, fall back to the html's own row/col count.
+    header_rows: int = 0
+    html_rows: List[List[dict]] = []
+    if fill_text and html:
+        header_rows, html_rows = _parse_html_table(html)
+    if n_rows == 0:
+        n_rows = len(html_rows)
+    if n_cols == 0:
+        n_cols = max(
+            (sum(max(1, int(c.get("colspan", 1) or 1)) for c in row) for row in html_rows),
+            default=0,
+        )
+    if n_rows == 0 or n_cols == 0:
+        return ""
+
+    # occ[r][c] = True once a cell covers that atomic position.
+    occ = [[False] * n_cols for _ in range(n_rows)]
+    # placed cells: (r, c, rowspan, colspan, text, header)
+    placed: List[Tuple[int, int, int, int, str, bool]] = []
+
+    # Standard left-to-right, top-to-bottom placement of the html cells.
+    # A cell is placed at the first column where its *entire* rs x cs
+    # rectangle is free (HTML table layout semantics).
+    for r, row in enumerate(html_rows):
+        if r >= n_rows:
+            break
+        c = 0
+        for cell in row:
+            rs = max(1, int(cell.get("rowspan", 1) or 1))
+            cs = max(1, int(cell.get("colspan", 1) or 1))
+            text = cell.get("text", "") if fill_text else ""
+            header = bool(cell.get("header"))
+            rs = min(rs, n_rows - r)
+            if rs <= 0:
+                continue
+            # find first column where the whole rectangle is free
+            placed_ok = False
+            while c + cs <= n_cols:
+                if all(not occ[r + dr][c + dc] for dr in range(rs) for dc in range(cs)):
+                    placed_ok = True
+                    break
+                c += 1
+            if not placed_ok:
+                # shrink colspan to fit remaining width rather than drop text
+                cs = min(cs, n_cols - c)
+                if cs <= 0:
+                    continue
+            placed.append((r, c, rs, cs, text, header))
+            for dr in range(rs):
+                for dc in range(cs):
+                    occ[r + dr][c + dc] = True
+            c += cs
+
+    # Hole filling, right-to-left, bottom-to-top: any atomic position not
+    # covered becomes an empty 1x1 cell so the table is a full rectangle.
+    for r in range(n_rows - 1, -1, -1):
+        for c in range(n_cols - 1, -1, -1):
+            if not occ[r][c]:
+                placed.append((r, c, 1, 1, "", False))
+                occ[r][c] = True
+
+    # Index cells by anchor for emission, sorted in reading order.
+    by_anchor = {(r, c): (rs, cs, text, header) for (r, c, rs, cs, text, header) in placed}
+
+    out = [f'<table border="{border}">']
+    thead_open = False
+    tbody_open = False
+    for r in range(n_rows):
+        is_header = r < header_rows
+        if is_header and not thead_open:
+            out.append("<thead>")
+            thead_open = True
+        if not is_header and not tbody_open:
+            if thead_open:
+                out.append("</thead>")
+                thead_open = False
+            out.append("<tbody>")
+            tbody_open = True
+        out.append("<tr>")
+        for c in range(n_cols):
+            key = (r, c)
+            if key in by_anchor:
+                rs, cs, text, header = by_anchor[key]
+                tag = "th" if (header or is_header) else "td"
+                attrs = []
+                if rs > 1:
+                    attrs.append(f'rowspan="{rs}"')
+                if cs > 1:
+                    attrs.append(f'colspan="{cs}"')
+                attr_str = (" " + " ".join(attrs)) if attrs else ""
+                out.append(f"<{tag}{attr_str}>{text}</{tag}>")
+            # else: covered by a span from an earlier anchor -> skip
+        out.append("</tr>")
+    if thead_open:
+        out.append("</thead>")
+    if tbody_open:
+        out.append("</tbody>")
+    out.append("</table>")
+    return "\n".join(out)
