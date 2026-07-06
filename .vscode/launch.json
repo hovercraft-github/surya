@@ -5,6 +5,14 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "hough",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "tests/api/hough.py",
+            "console": "integratedTerminal",
+            "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p36.png"
+        },
+        {
             "name": "surya_api.py",
             "type": "debugpy",
             "request": "launch",
@@ -44,7 +52,11 @@
                 "SURYA_INFERENCE_CTX_PER_SLOT": "50000",
                 "LLAMA_CPP_NGL": "-1",
             },
-            "args": ["--remote-debug", "--port", "8521"]
+            "args": [
+                "--remote-debug",
+                "--port",
+                "8521"
+            ]
         }
     ]
 }
