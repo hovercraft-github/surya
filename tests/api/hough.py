@@ -5,6 +5,26 @@ from random import randint
 import itertools
 
 
+def is_polygon_nested(poly_outer, poly_inner):
+    """
+    Checks if poly_inner is completely nested inside poly_outer.
+    """
+    # Iterate through all vertices of the inner polygon
+    for point in poly_inner:
+        # Measure distance from point to the outer polygon contour
+        dist = cv.pointPolygonTest(poly_outer, tuple(point), measureDist=False)
+        
+        # If any point is outside (-1) or on the edge (0), it is not nested
+        if dist < 1:
+            return False
+            
+    return True
+
+# --- Example Usage ---
+# outer_poly = np.array([[10, 10], [10, 100], [100, 100], [100, 10], [10, 10]])
+# inner_poly = np.array([[30, 30], [30, 70], [70, 70], [70, 30], [30, 30]])
+# nested = is_polygon_nested(outer_poly, inner_poly)
+
 def get_segment_intersection_(indexed_linesseg: dict[int, list[int]], ix1: int, ix2: int) -> tuple[frozenset[int], int, int] | None:
     """Finds the intersection point of two line segments if it exists."""
     seg1 = indexed_linesseg[ix1]
@@ -301,8 +321,8 @@ def main(argv):
     dst = cv.Canny(src, 50, 200, None, 3)
     
     # Copy edges to the images that will display the results in BGR
-    cdst = cv.cvtColor(dst, cv.COLOR_GRAY2BGR)
-    cdstP = np.copy(cdst)
+    cdstP = cv.cvtColor(dst, cv.COLOR_GRAY2BGR)
+    # cdstP = np.copy(cdst)
     
     linesP = cv.HoughLinesP(dst, 1, np.pi / 180 * 3, 200, None, 200, 10)
     raw_lines: list[list[int]] = [seg for seg in linesP.tolist()] if linesP is not None else []
@@ -316,14 +336,14 @@ def main(argv):
     closed_loops = find_all_closed_loops(indexed_lines, intersections)
     print(f"Found {len(closed_loops)} closed loops (rectangles) in the image.")
     main_frames = {ix: seg for ix, seg in closed_loops.items() if path_has_points(seg[0], {origin_point}, tolerance=10)}
-    document_frames = dict(itertools.islice(sorted(main_frames.items(), key=lambda item: item[1][1], reverse=True), 0, 2))
+    standard_frames = dict(itertools.islice(sorted(main_frames.items(), key=lambda item: item[1][1], reverse=True), 0, 2))
     
     if linesP is not None:
         for i in range(0, len(linesP)):
             l = linesP[i]
             cv.line(cdstP, (l[0], l[1]), (l[2], l[3]), (randint(80,200),randint(80,200),randint(80,200)), 3, cv.LINE_AA)
 
-    for val in document_frames.values():
+    for val in standard_frames.values():
         loop, square = val
         x_coords = [point[1][0] for point in loop]
         y_coords = [point[1][1] for point in loop]

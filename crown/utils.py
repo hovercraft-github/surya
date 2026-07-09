@@ -12,6 +12,12 @@ from fastapi import UploadFile
 from concurrent.futures import ProcessPoolExecutor
 
 
+def get_bg_color(image: Image.Image) -> int|tuple[int, int, int]:
+    """Returns the most common color in the image."""
+    pixels = image.getcolors(image.size[0] * image.size[1])
+    bg_color = max(pixels, key=lambda x: x[0])[1] if pixels else (255, 255, 255)
+    return bg_color
+
 def get_page_image(
     pdf_file: UploadFile, page_num: int, dpi: int | None = None
 ) -> Image.Image:

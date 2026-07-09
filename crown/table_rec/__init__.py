@@ -111,6 +111,19 @@ def call_glm_ocr(image: Image.Image, prompt: str | None = None, num_predict: int
     result = r.json()
     return result
 
+
+async def glm_ocr(image: Image.Image, prompt: str | None = None) -> str:
+    """Call glm-ocr via Ollama chat API and return the extracted text content."""
+    if not prompt:
+        prompt = "Table Recognition:"
+    result = call_glm_ocr(image, prompt=prompt)
+    content = str(result.get("message", {}).get("content", ""))
+    if "```json" in content or content.startswith("[["):
+        content = ""
+    if "```table" in content:
+        content = content.split("```table", 1)[-1].rsplit("```", 1)[0].strip()
+    return content
+
 class TableExtPredictor(TableRecPredictor):
     def __init__(self, manager: Optional[SuryaInferenceManager] = None):
         super().__init__(manager)

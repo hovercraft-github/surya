@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import multiprocessing
+from typing import Any
 # This MUST be called before any other app setups or process creations
 try:
     multiprocessing.set_start_method('spawn', force=True)
@@ -23,7 +24,8 @@ from PIL import Image, ImageOps
 
 import asyncio
 
-from crown.table_rec import TableExtPredictor, reconstruct_html_table
+from crown.stamp_frame import split_frames, StampFrame
+from crown.table_rec import TableExtPredictor, reconstruct_html_table, glm_ocr
 from crown.utils import bbox_expand, crop_by_percent, crop_by_side_percent, get_page_image, trim_empty_background
 from crown.utils import poligon_expand
 from crown.settings import crown_settings
@@ -266,6 +268,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+async def stamp_ocr(image: Image.Image, location: str = "stamp") -> dict[str, Any]:
+    # recognizer = RecognitionPredictor(inference_manager)
+    # predictions = await asyncio.to_thread(recognizer, [image], full_page=True)
+    # OLLAMA_URL = crown_settings.OLLAMA_URL_LAYOUT
+    # if OLLAMA_URL:
+    #     try:
+    #         stamp_result = await glm_ocr(image, prompt="Text Recognition:")
+    #         full_html = f'<div id="stamp">{stamp_result}</div>'
+    #         return {"html": full_html, "blocks": None}
+    #     except Exception as e:
+    #         crown_logger.error(f"Stamp OCR failed: {e}")
+    #         return {"error": str(e)}
+    # layout_predictor = LayoutPredictor(inference_manager)
+    # layouts = layout_predictor([image])
+    # if not layouts or not layouts[0].bboxes:
+    #     return {"html": "", "blocks": []}
+    # texts, filtered_bboxes = text_recognition(image, layouts)
+    table_rec_predictor = TableExtPredictor(inference_manager)
+    table_preds = table_rec_predictor.predict_flexible([image], mode="td")
+    blocks_data = []
+    html_parts = []
+    for block in table_preds:
+        if block.html:  # Skip empty/skipped blocks
+            html_parts.append(
+                f'<div class="block" data-label="{location}">{block.html}</div>'
+            )
+    full_html = '<div id="page_metadata">' + "\n".join(html_parts) + "</div>"
+    return {"html": full_html, "blocks": blocks_data}
 
 @app.post("/ocr/full/")
 async def ocr_full_page(request: Request, file: UploadFile = File(...),
@@ -594,6 +624,24 @@ async def ocr_blocks(request: Request, file: UploadFile = File(...),
                     crop_top=crop_top,
                     crop_bottom=crop_bottom,
                 )
+                metadata_interior, page_content, upper_right, bottom_right, frames_dict = await asyncio.to_thread(split_frames, image)
+                page_metadata = {}
+                if metadata_interior:
+                    stamp_ocr_result = await stamp_ocr(metadata_interior)
+                    page_metadata["stamp"] = stamp_ocr_result
+                if upper_right:
+                    if crown_settings.DEBUG_FOLDER:
+                        os.makedirs(crown_settings.DEBUG_FOLDER, exist_ok=True)
+                        upper_right.save(f"{crown_settings.DEBUG_FOLDER}/upper_right.png")
+                    upper_right_ocr_result = await stamp_ocr(upper_right, "upper_right_corner")
+                    page_metadata["upper_right_corner"] = upper_right_ocr_result
+                if bottom_right:
+                    if crown_settings.DEBUG_FOLDER:
+                        os.makedirs(crown_settings.DEBUG_FOLDER, exist_ok=True)
+                        bottom_right.save(f"{crown_settings.DEBUG_FOLDER}/bottom_right.png")
+                    bottom_right_ocr_result = await stamp_ocr(bottom_right, "bottom_right_corner")
+                    page_metadata["bottom_right_corner"] = bottom_right_ocr_result
+                image = page_content if page_content else image  # Use the main content area for OCR
                 layout_predictor = LayoutPredictor(inference_manager)
                 layouts = await asyncio.to_thread(layout_predictor, [image])
                 if not layouts or not layouts[0].bboxes:
@@ -650,6 +698,7 @@ async def ocr_blocks(request: Request, file: UploadFile = File(...),
                     crown_logger.warning(f"Client disconnected before OCR response for {file.filename}.")
                     return {"blocks": [], "html": ""}
                 return {
+                    "page_metadata": page_metadata,
                     "blocks": blocks_data,
                     "html": full_html,
                 }
