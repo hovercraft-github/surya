@@ -269,24 +269,12 @@ app.add_middleware(
 )
 
 async def stamp_ocr(image: Image.Image, location: str = "stamp") -> dict[str, Any]:
-    # recognizer = RecognitionPredictor(inference_manager)
-    # predictions = await asyncio.to_thread(recognizer, [image], full_page=True)
-    # OLLAMA_URL = crown_settings.OLLAMA_URL_LAYOUT
-    # if OLLAMA_URL:
-    #     try:
-    #         stamp_result = await glm_ocr(image, prompt="Text Recognition:")
-    #         full_html = f'<div id="stamp">{stamp_result}</div>'
-    #         return {"html": full_html, "blocks": None}
-    #     except Exception as e:
-    #         crown_logger.error(f"Stamp OCR failed: {e}")
-    #         return {"error": str(e)}
-    # layout_predictor = LayoutPredictor(inference_manager)
-    # layouts = layout_predictor([image])
-    # if not layouts or not layouts[0].bboxes:
-    #     return {"html": "", "blocks": []}
-    # texts, filtered_bboxes = text_recognition(image, layouts)
     table_rec_predictor = TableExtPredictor(inference_manager)
-    table_preds = table_rec_predictor.predict_flexible([image], mode="td")
+    if location in ["upper_right_corner", "bottom_right_corner"]:
+        mode = "corner"
+    else:
+        mode = "stamp"
+    table_preds = table_rec_predictor.predict_flexible([image], mode=mode)
     blocks_data = []
     html_parts = []
     for block in table_preds:
@@ -627,6 +615,9 @@ async def ocr_blocks(request: Request, file: UploadFile = File(...),
                 metadata_interior, page_content, upper_right, bottom_right, frames_dict = await asyncio.to_thread(split_frames, image)
                 page_metadata = {}
                 if metadata_interior:
+                    if crown_settings.DEBUG_FOLDER:
+                        os.makedirs(crown_settings.DEBUG_FOLDER, exist_ok=True)
+                        metadata_interior.save(f"{crown_settings.DEBUG_FOLDER}/metadata_interior.png")
                     stamp_ocr_result = await stamp_ocr(metadata_interior)
                     page_metadata["stamp"] = stamp_ocr_result
                 if upper_right:

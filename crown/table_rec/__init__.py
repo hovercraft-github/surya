@@ -8,11 +8,13 @@ from io import BytesIO
 import requests
 import json
 
+from torch.cuda import temperature
+
 
 from surya.table_rec import TableRecPredictor, _polygon_from_bbox, _intersect_bbox, logger
 from surya.table_rec.schema import TableCell, TableCol, TableResult, TableRow
 from surya.inference.prompts import PROMPT_TYPE_TABLE_REC, TABLE_REC_JSON_SCHEMA, TABLE_REC_LABEL_SET
-from surya.inference.schema import PROMPT_TYPE_BLOCK, BatchInputItem
+from surya.inference.schema import PROMPT_TYPE_BLOCK, BatchInputItem, BatchOutputItem
 from surya.inference.util import image_token_budget
 from surya.inference import SuryaInferenceManager, get_default_manager
 from surya.logging import get_logger
@@ -71,7 +73,7 @@ GLMOCR_PROMPT_LAYOUT = (
 )
 
 
-def call_glm_ocr(image: Image.Image, prompt: str | None = None, num_predict: int | None = None) -> dict:
+def ollama_glm(image: Image.Image, prompt: str | None = None, num_predict: int | None = None) -> dict:
     """Call glm-ocr via Ollama chat API and return the full response JSON."""
     buffered = BytesIO()
     image.save(buffered, format="PNG")
@@ -111,12 +113,77 @@ def call_glm_ocr(image: Image.Image, prompt: str | None = None, num_predict: int
     result = r.json()
     return result
 
+SURYA_OLLAMA_TBL_HTML_PROMPT = (
+    # "OCR this table block image to HTML"
+    "OCR this table to HTML"
+)
+
+SURYA_OLLAMA_STAMP_HTML_PROMPT = (
+    "OCR this table to plain text"
+)
+
+SURYA_OLLAMA_STAMP_CORNER_PROMPT = (
+    # "OCR this table block image to plain text"
+    "OCR this block to HTML"
+)
+
+SURYA_OLLAMA_TBL_JSON_PROMPT = ( 
+    # "OCR this block image to JSON. Each entry is a dict with "
+    # '"text" (raw OCR text), and "bbox" (x0 y0 x1 y1, normalized 0-1000).'
+    'Output the table rows then columns as JSON. Each entry is a dict with "label" ("Row" or "Col") '
+    'and "bbox" (x0 y0 x1 y1, normalized 0-1000).'
+)
+# Output the table rows then columns as JSON. Each entry is a dict with "label" ("Row" or "Col") and "bbox" (x0 y0 x1 y1, normalized 0-1000).
+
+def ollama_surya(image: Image.Image, prompt: str | None = None, num_predict: int | None = None, temperature: float | None = None) -> dict:
+    """Call glm-ocr via Ollama chat API and return the full response JSON."""
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    img_b64 = base64.b64encode(buffered.getvalue()).decode()
+    OLLAMA_URL = crown_settings.OLLAMA_URL
+    if not OLLAMA_URL:
+        OLLAMA_URL = crown_settings.OLLAMA_URL_LAYOUT
+    if not OLLAMA_URL:
+        raise ValueError("OLLAMA_URL or OLLAMA_URL_LAYOUT must be set in crown_settings.")
+    if not prompt:
+        prompt = SURYA_OLLAMA_TBL_HTML_PROMPT
+
+    payload = {
+        "model": crown_settings.OLLAMA_SURYA_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+                "images": [img_b64],
+            }
+        ],
+        "stream": False,
+        "options": {
+                    # "temperature": 0.0,
+                    # "stop": ["\n", "\n\n", " \n \n \n", "---"],
+                    # "stop": ["\n\n", " \n \n \n", "---", "\n```\n```", "``````"],
+                    # "num_predict": 2048,
+                    # "repeat_penalty": 1.4
+                    },
+    }
+
+    if num_predict is not None:
+        payload["options"]["num_predict"] = num_predict
+    if temperature is not None:
+        payload["options"]["temperature"] = temperature
+
+    r = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=300)
+    r.raise_for_status()
+
+    result = r.json()
+    return result
+
 
 async def glm_ocr(image: Image.Image, prompt: str | None = None) -> str:
     """Call glm-ocr via Ollama chat API and return the extracted text content."""
     if not prompt:
         prompt = "Table Recognition:"
-    result = call_glm_ocr(image, prompt=prompt)
+    result = ollama_glm(image, prompt=prompt)
     content = str(result.get("message", {}).get("content", ""))
     if "```json" in content or content.startswith("[["):
         content = ""
@@ -141,7 +208,7 @@ class TableExtPredictor(TableRecPredictor):
         if crown_settings.OLLAMA_URL:
             results = []
             for img in images:
-                result = call_glm_ocr(img)
+                result = ollama_glm(img)
                 w, h = img.size
                 page_bbox = [0, 0, float(w), float(h)]
                 results.append(
@@ -157,16 +224,22 @@ class TableExtPredictor(TableRecPredictor):
                     )
                 )
             return results
-        manager = self.manager or get_default_manager()
         if counts is None:
             counts = [0] * len(images)
         batch = []
+        temperature: float | None = None
         if mode == "td":
             prompt = None
-            prompt_type = PROMPT_TYPE_BLOCK
         elif mode == "div":
             prompt = BLOCK_PROMPT_TBL
-            prompt_type = "" # Emty string by intention!
+        elif mode == "stamp":
+            prompt = SURYA_OLLAMA_STAMP_HTML_PROMPT
+        elif mode == "corner":
+            prompt = SURYA_OLLAMA_STAMP_CORNER_PROMPT
+        if prompt:
+            prompt_type = ""
+        else:
+            prompt_type = PROMPT_TYPE_BLOCK
         for img, count in zip(images, counts):
             batch.append(
                 BatchInputItem(
@@ -180,9 +253,29 @@ class TableExtPredictor(TableRecPredictor):
                     ),
                 )
             )
-        outputs = manager.generate(batch)
+        if crown_settings.OLLAMA_URL_LAYOUT and crown_settings.OLLAMA_SURYA_MODEL:
+            surya_outputs: list[BatchOutputItem] = []
+            if mode == "td":
+                prompt = SURYA_OLLAMA_TBL_HTML_PROMPT
+                # temperature = 0.5
+            for item in batch:
+                result = ollama_surya(item.image, prompt=prompt, temperature=temperature)
+                content = str(result.get("message", {}).get("content", ""))
+                if ("<img/>" in content  or "\"bbox\"" in content): #and mode == "stamp":
+                    result = ollama_surya(item.image, prompt="OCR this block image to HTML.", temperature=0.5)
+                    content = str(result.get("message", {}).get("content", ""))
+                surya_result:BatchOutputItem = BatchOutputItem(
+                    raw=content,
+                    error=False,
+                    metadata=item.metadata,
+                    token_count=len(content) if content else 0
+                )
+                surya_outputs.append(surya_result)
+        else:
+            manager = self.manager or get_default_manager()
+            surya_outputs = manager.generate(batch)
         results: List[TableResult] = []
-        for img, out in zip(images, outputs):
+        for img, out in zip(images, surya_outputs):
             w, h = img.size
             page_bbox = [0, 0, float(w), float(h)]
             if out.error:
@@ -230,9 +323,10 @@ class TableExtPredictor(TableRecPredictor):
             for i, img in enumerate(images)
         ]
         glm_results: dict[int, str] = {}
-        if crown_settings.OLLAMA_URL_LAYOUT:
+        if crown_settings.OLLAMA_URL_LAYOUT and crown_settings.OLLAMA_SURYA_MODEL:
+            surya_results: list[BatchOutputItem] = []
             for item in batch:
-                result = call_glm_ocr(item.image, prompt=GLMOCR_PROMPT_LAYOUT)
+                result = ollama_glm(item.image, prompt=GLMOCR_PROMPT_LAYOUT)
                 content = str(result.get("message", {}).get("content", ""))
                 if "```json" in content or content.startswith("[["):
                     content = ""
@@ -245,11 +339,21 @@ class TableExtPredictor(TableRecPredictor):
                     debug_path = Path(crown_settings.DEBUG_FOLDER) / "glm_ocr_layout.json"
                     with open(debug_path, "w", encoding="utf-8") as f:
                         json.dump(result, f, ensure_ascii=False, indent=2)
-        manager = self.manager or get_default_manager()
-        outputs = manager.generate(batch)
+                result = ollama_surya(item.image, prompt=SURYA_OLLAMA_TBL_JSON_PROMPT)
+                content = str(result.get("message", {}).get("content", ""))
+                surya_result:BatchOutputItem = BatchOutputItem(
+                    raw=content,
+                    error=False,
+                    metadata=item.metadata,
+                    token_count=len(content) if content else 0
+                )
+                surya_results.append(surya_result)
+        else:
+            manager = self.manager or get_default_manager()
+            surya_results = manager.generate(batch)
 
         results: List[TableResult] = []
-        for out in outputs:
+        for out in surya_results:
             ix = out.metadata["image_index"]
             img = batch[ix].image
             w, h = img.size

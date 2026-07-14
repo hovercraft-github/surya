@@ -554,7 +554,7 @@ def split_frames(
             if overlap is not None:
                 local = (
                     overlap[0] - corner_bbox[0],
-                    overlap[1] - corner_bbox[1],
+                    overlap[1] - corner_bbox[1] - corner_tolerance,
                     overlap[2] - corner_bbox[0] + corner_tolerance,
                     overlap[3] - corner_bbox[1] + corner_tolerance,
                 )
@@ -572,5 +572,5 @@ def split_frames(
         "page_content_frame": page_content_frame,
         "metadata_frame": metadata_frame,
     }
-
+    metadata_interior = ImageOps.expand(metadata_interior, border=corner_tolerance*5, fill=bg) if metadata_interior else None
     return metadata_interior, page_content, upper_right, bottom_right, frames_dict

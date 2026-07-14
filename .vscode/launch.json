@@ -10,7 +10,12 @@
             "request": "launch",
             "program": "tests/api/hough.py",
             "console": "integratedTerminal",
-            "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p36.png"
+            // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p36.png"
+            "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p57.png"
+            // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p54.png"
+            // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p56.png"
+            // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p1.png"
+            // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p2.png"
         },
         {
             "name": "surya_api.py",
@@ -34,6 +39,8 @@
                 // "OLLAMA_URL": "http://localhost:11434"
                 "OLLAMA_URL_LAYOUT": "http://localhost:11434",
                 // "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ"
+                "OLLAMA_SURYA_MODEL": "surya-ocr-2-65535",
+                // "OLLAMA_SURYA_MODEL": "surya2-ocr-64k",
                 "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ/Пример2/"
             },
         },
