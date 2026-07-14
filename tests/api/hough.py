@@ -1,5 +1,6 @@
 import sys
 import os
+from turtle import right
 os.environ["QT_QPA_FONTDIR"] = "/usr/share/fonts/truetype/dejavu/"
 import cv2 as cv
 import numpy as np
@@ -400,6 +401,36 @@ def get_bottom_right_point(indexed_linesseg: dict[int, list[int]]) -> tuple[int,
             point_y = max(y1, y2)
     return (point_x, point_y)
 
+def find_bottom_right_corner_of_loops(
+    closed_loops: dict[frozenset, tuple[list[tuple[int, tuple[int, int]]], int]],
+) -> tuple[int, int] | None:
+    """Returns the coordinates of the most bottom-right corner among all
+    loops in ``closed_loops``.
+
+    Each loop is a list of ``(segment_index, (x, y))`` corner points (as
+    produced by [`find_all_closed_loops()`](tests/api/hough.py:412)). The
+    "most bottom-right" corner is the one with the greatest ``x + y`` sum;
+    ties are broken by the greatest ``x`` and then the greatest ``y``.
+
+    Parameters:
+        closed_loops: Output of ``find_all_closed_loops``. Each value is a
+            ``(loop, square)`` tuple where ``loop`` is a list of
+            ``(segment_index, (x, y))`` points.
+
+    Returns:
+        The ``(x, y)`` coordinates of the most bottom-right corner, or
+        ``None`` if ``closed_loops`` is empty or contains no corner points.
+    """
+    best_point: tuple[int, int] | None = None
+    best_key: tuple[int, int, int] | None = None
+    for loop, _ in closed_loops.values():
+        for _, (x, y) in loop:
+            key = (x + y, x, y)
+            if best_key is None or key > best_key:
+                best_key = key
+                best_point = (x, y)
+    return best_point
+
 def path_has_points(path: list[tuple[int, tuple[int, int]]], points: set[tuple[int, int]], tolerance: int) -> bool:
     """Checks if any point in the path is in the given set of points."""
     for _, point in path:
@@ -471,7 +502,7 @@ def find_payload_bottom_y(
     indexed_lines: dict[int, list[int]],
     standard_frames: dict[frozenset, tuple[list[tuple[int, tuple[int, int]]], int]],
     inside_tolerance: int = 10,
-    cluster_tolerance: int = 10,
+    min_bottom_gap: int = 200,
 ) -> tuple[int | None, list[int]]:
     """Finds the most probable bottom y-coordinate among the vertical lines
     contained inside the first standard frame whose length exceeds half of
@@ -484,24 +515,15 @@ def find_payload_bottom_y(
     expanded by ``inside_tolerance`` pixels). The line length is the euclidean
     distance between its endpoints.
 
-    Among the matching lines the bottom y-coordinate of each line
-    (``get_seg_bottom_y``) is collected. These values are then clustered with
-    ``cluster_tolerance`` and the y-coordinate of the largest cluster (its
-    rounded average) is returned as the most probable bottom end. When several
-    clusters share the same size the one closer to the top (smaller y) wins,
-    which keeps the result stable for ambiguous cases.
-
     Parameters:
         indexed_lines: Mapping of line index to ``[x1, y1, x2, y2]`` segments.
         standard_frames: Output of ``find_all_closed_loops`` filtered down to
             the standard frames. Only its first item (insertion order) is used.
         inside_tolerance: Extra margin (in pixels) added to the frame bbox
             when testing whether a line is inside the frame.
-        cluster_tolerance: Maximum gap (in pixels) between consecutive sorted
-            bottom y values to be merged into the same cluster.
 
     Returns:
-        The most probable bottom y-coordinate as an int, or ``None`` if there
+        The bottom-most y-coordinate plus inside_tolerance as an int, or ``None`` if there
         is no such vertical line / no standard frame.
     """
     if not standard_frames:
@@ -517,10 +539,30 @@ def find_payload_bottom_y(
         return None, []
     min_length = frame_height / 10
 
+    frame_v_borders = []
+    prev_point = loop[-1][1]
+    for item in loop:
+        index, (x, y) = item
+        x1, y1 = prev_point
+        x2, y2 = x, y
+        if get_seg_vertical_size(x1, y1, x2, y2) > get_seg_horizontal_size(x1, y1, x2, y2):
+            frame_v_borders.append(index)
+        prev_point = (x, y)
+    # print("Main frame vertical borders:")
+    # for index in frame_v_borders:
+    #     if index not in indexed_lines:
+    #         print(f"  Index {index}: Not found in indexed_lines")
+    #     else:
+    #         x1, y1, x2, y2 = indexed_lines[index]
+    #         print(f"  Index {index}: ({x1}, {y1}) -> ({x2}, {y2})")
     segment_indexes: list[int] = []
     bottom_ys: list[int] = []
     for index, seg in indexed_lines.items():
+        if index in frame_v_borders:
+            continue
         x1, y1, x2, y2 = seg
+        if abs(max(y1, y2) - frame_y2) <= min_bottom_gap or max(y1, y2) >= frame_y2:
+            continue
         # Only vertical segments are of interest.
         if get_seg_vertical_size(x1, y1, x2, y2) <= get_seg_horizontal_size(x1, y1, x2, y2):
             continue
@@ -547,16 +589,12 @@ def find_payload_bottom_y(
     if not bottom_ys:
         return None, []
 
-    # Cluster the bottom y values and return the rounded average of the
-    # largest cluster as the most probable bottom end.
-    clusters: list[list[int]] = []
-    for by in sorted(bottom_ys):
-        if clusters and by - clusters[-1][-1] <= cluster_tolerance:
-            clusters[-1].append(by)
-        else:
-            clusters.append([by])
-    best_cluster = max(clusters, key=lambda c: (len(c), -sum(c) / len(c)))
-    return int(round(sum(best_cluster) / len(best_cluster))), segment_indexes
+    # print("Vertical segments:")
+    # for index in segment_indexes:
+    #     x1, y1, x2, y2 = indexed_lines[index]
+    #     print(f"  Index {index}: ({x1}, {y1}) -> ({x2}, {y2})")
+    bottom_ys = sorted(bottom_ys, reverse=True)
+    return bottom_ys[0] + inside_tolerance, segment_indexes
 
 
 def find_largest_frame_below_y(
@@ -819,7 +857,7 @@ def main(argv):
         print(f"Detected skew angle: {skew_angle:.2f} degrees. Deskewing the image...")
         center = (w_img // 2, h_img // 2)
         rotation_matrix = cv.getRotationMatrix2D(center, skew_angle * -1, 1.0)
-        src = cv.warpAffine(src, rotation_matrix, (w_img, h_img), flags=cv.INTER_LINEAR, borderMode=cv.BORDER_REPLICATE)
+        src = cv.warpAffine(src, rotation_matrix, (w_img, h_img), flags=cv.INTER_CUBIC, borderMode=cv.BORDER_REPLICATE) #, INTER_LINEAR, borderMode=cv.BORDER_REPLICATE)
         dst = cv.Canny(src, 50, 200, None, 3)
         cdstP = np.zeros((h_img, w_img, 3), dtype=np.uint8)
         cv.bitwise_not(src, dst)
@@ -833,12 +871,15 @@ def main(argv):
     indexed_lines: dict[int, list[int]] = dict(enumerate(lines)) if lines else {}
     outer_lines = {ix: seg for ix, seg in indexed_lines.items()
                      if is_endpoint_outside_bbox((seg[0], seg[1]), (seg[2], seg[3]), payload_bbox, tolerance=1)}
-    origin_point = get_bottom_right_point(outer_lines)
+    # origin_point = get_bottom_right_point(outer_lines)
     intersections = find_all_segment_intersections(outer_lines, tolerance=20.0)
-    closed_loops = find_all_closed_loops(outer_lines, intersections, edge_len_threshold=100, square_threshold=500000)
+    closed_loops = find_all_closed_loops(outer_lines, intersections, edge_len_threshold=100, square_threshold=200000)
+    origin_point = find_bottom_right_corner_of_loops(closed_loops)
     print(f"Found {len(closed_loops)} closed loops (rectangles) in the image.")
-    main_frames = {ix: seg for ix, seg in closed_loops.items() if path_has_points(seg[0], {origin_point}, tolerance=100)}
-    standard_frames = dict(itertools.islice(sorted(main_frames.items(), key=lambda item: item[1][1], reverse=True), 0, 2))
+    origin_points = set([origin_point]) if origin_point is not None else set()
+    main_frames = {ix: seg for ix, seg in closed_loops.items() if path_has_points(seg[0], origin_points, tolerance=100)}
+    main_frames = dict(sorted(main_frames.items(), key=lambda item: item[1][1], reverse=True))
+    standard_frames = dict(itertools.islice(main_frames.items(), 0, 2))
     found_line_ix: list[int] = []
     payload_bottom_y: int | None = None
     if len(standard_frames) > 1:
@@ -846,10 +887,10 @@ def main(argv):
         vol2 = list(standard_frames.values())[1][1]
         if vol2 > vol1//5:
             standard_frames.popitem()
-            payload_bottom_y, found_line_ix = find_payload_bottom_y(indexed_lines, standard_frames, inside_tolerance=0, cluster_tolerance=10)
+            payload_bottom_y, found_line_ix = find_payload_bottom_y(indexed_lines, standard_frames, inside_tolerance=10, min_bottom_gap=200)
             if payload_bottom_y is not None:
-                print(f"Most probable payload bottom y-coordinate: {payload_bottom_y}")
-                stamp = find_largest_frame_below_y(main_frames, payload_bottom_y + 20, inclusive=False)
+                print(f"Payload bottom y-coordinate: {payload_bottom_y}")
+                stamp = find_largest_frame_below_y(main_frames, payload_bottom_y, inclusive=False)
                 if stamp is not None:
                     stamp_key, (stamp_loop, stamp_square) = stamp
                     l1 = get_edge_length(stamp_loop[0][1], stamp_loop[1][1])
@@ -873,13 +914,14 @@ def main(argv):
                 color = (255, 0, 0)  # Highlight found lines in blue
             cv.line(cdstP, (l[0], l[1]), (l[2], l[3]), color, 3, cv.LINE_AA)
 
-    for val in standard_frames.values():
-        loop, square = val
-        x_coords = [point[1][0] for point in loop]
-        y_coords = [point[1][1] for point in loop]
-        x1, y1 = min(x_coords), min(y_coords)
-        x2, y2 = max(x_coords), max(y_coords)
-        cv.rectangle(cdstP, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 4, cv.LINE_AA)
+    if origin_point:
+        for val in standard_frames.values():
+            loop, square = val
+            x_coords = [point[1][0] for point in loop]
+            y_coords = [point[1][1] for point in loop]
+            x1, y1 = min(x_coords), min(y_coords)
+            x2, y2 = origin_point #max(x_coords), max(y_coords)
+            cv.rectangle(cdstP, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 4, cv.LINE_AA)
 
     cv.namedWindow("Scaled Window", cv.WINDOW_NORMAL)
     # cv.resizeWindow("Scaled Window", 600, 800)

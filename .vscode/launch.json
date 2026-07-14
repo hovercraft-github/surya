@@ -11,11 +11,14 @@
             "program": "tests/api/hough.py",
             "console": "integratedTerminal",
             // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p36.png"
-            "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p57.png"
+            // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p57.png"
             // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p54.png"
             // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p56.png"
             // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p1.png"
             // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p2.png"
+            // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p3.png"
+            // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p4.png"
+            "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p5.png"
         },
         {
             "name": "surya_api.py",
