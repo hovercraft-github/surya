@@ -504,8 +504,8 @@ def find_payload_bottom_y(
     inside_tolerance: int = 10,
     min_bottom_gap: int = 200,
 ) -> tuple[int | None, list[int]]:
-    """Finds the most probable bottom y-coordinate among the vertical lines
-    contained inside the first standard frame whose length exceeds half of
+    """Finds the bottom y-coordinate among the vertical lines
+    contained inside the first standard frame whose upper point is above the half of
     the frame height.
 
     A line is considered vertical when its vertical size is strictly greater
@@ -521,6 +521,7 @@ def find_payload_bottom_y(
             the standard frames. Only its first item (insertion order) is used.
         inside_tolerance: Extra margin (in pixels) added to the frame bbox
             when testing whether a line is inside the frame.
+        min_bottom_gap: Minimum distance (in pixels) from the bottom of the frame to the vertical line.
 
     Returns:
         The bottom-most y-coordinate plus inside_tolerance as an int, or ``None`` if there
@@ -595,6 +596,95 @@ def find_payload_bottom_y(
     #     print(f"  Index {index}: ({x1}, {y1}) -> ({x2}, {y2})")
     bottom_ys = sorted(bottom_ys, reverse=True)
     return bottom_ys[0] + inside_tolerance, segment_indexes
+
+
+def find_stamp_top_y(
+    indexed_lines: dict[int, list[int]],
+    standard_frames: dict[frozenset, tuple[list[tuple[int, tuple[int, int]]], int]],
+    inside_tolerance: int = 10,
+    max_length_ratio: float = 0.25,
+) -> tuple[int | None, list[int]]:
+    """Finds the top y-coordinate among the upper ends of the vertical lines
+    touching the bottom line of the first standard frame and having length
+    less than ``max_length_ratio`` (default 1/4) of the frame height.
+
+    A line is considered vertical when its vertical size is strictly greater
+    than its horizontal size (see ``get_seg_vertical_size`` /
+    ``get_seg_horizontal_size``). A line is considered inside the frame when
+    both of its endpoints fall within the frame bounding box (optionally
+    expanded by ``inside_tolerance`` pixels). A line is considered to touch
+    the bottom line of the frame when its bottom y-coordinate is within
+    ``inside_tolerance`` pixels of the frame bottom. The line length is the
+    euclidean distance between its endpoints.
+
+    Parameters:
+        indexed_lines: Mapping of line index to ``[x1, y1, x2, y2]`` segments.
+        standard_frames: Output of ``find_all_closed_loops`` filtered down to
+            the standard frames. Only its first item (insertion order) is used.
+        inside_tolerance: Extra margin (in pixels) added to the frame bbox
+            when testing whether a line is inside the frame, and also used as
+            the tolerance when checking that the line touches the frame bottom.
+        max_length_ratio: Maximum allowed line length expressed as a fraction
+            of the frame height (defaults to 0.25, i.e. 1/4).
+
+    Returns:
+        The top-most y-coordinate minus inside_tolerance as an int, or ``None``
+        if there is no such vertical line / no standard frame.
+    """
+    if not standard_frames:
+        return None, []
+
+    loop, _ = next(iter(standard_frames.values()))
+    x_coords = [point[1][0] for point in loop]
+    y_coords = [point[1][1] for point in loop]
+    frame_x1, frame_y1 = min(x_coords), min(y_coords)
+    frame_x2, frame_y2 = max(x_coords), max(y_coords)
+    frame_height = frame_y2 - frame_y1
+    if frame_height <= 0:
+        return None, []
+    max_length = frame_height * max_length_ratio
+
+    frame_v_borders = []
+    prev_point = loop[-1][1]
+    for item in loop:
+        index, (x, y) = item
+        x1, y1 = prev_point
+        x2, y2 = x, y
+        if get_seg_vertical_size(x1, y1, x2, y2) > get_seg_horizontal_size(x1, y1, x2, y2):
+            frame_v_borders.append(index)
+        prev_point = (x, y)
+
+    segment_indexes: list[int] = []
+    top_ys: list[int] = []
+    for index, seg in indexed_lines.items():
+        if index in frame_v_borders:
+            continue
+        x1, y1, x2, y2 = seg
+        # Only vertical segments are of interest.
+        if get_seg_vertical_size(x1, y1, x2, y2) <= get_seg_horizontal_size(x1, y1, x2, y2):
+            continue
+        # Both endpoints must lie inside the frame bounding box.
+        if is_endpoint_outside_bbox(
+            (x1, y1), (x2, y2),
+            (frame_x1, frame_y1, frame_x2, frame_y2),
+            tolerance=inside_tolerance,
+        ):
+            continue
+        # The line must touch the bottom line of the frame.
+        if abs(get_seg_bottom_y(x1, y1, x2, y2) - frame_y2) > inside_tolerance:
+            continue
+        # Length must be less than max_length_ratio of the frame height.
+        length = float(np.hypot(x2 - x1, y2 - y1))
+        if length >= max_length:
+            continue
+        segment_indexes.append(index)
+        top_ys.append(get_seg_top_y(x1, y1, x2, y2))
+
+    if not top_ys:
+        return None, []
+
+    top_ys = sorted(top_ys)
+    return top_ys[0] - inside_tolerance, segment_indexes
 
 
 def find_largest_frame_below_y(
@@ -898,9 +988,24 @@ def main(argv):
                     l3 = get_edge_length(stamp_loop[2][1], stamp_loop[3][1])
                     l4 = get_edge_length(stamp_loop[3][1], stamp_loop[0][1])
                     print(f"Found stamp frame with edges: {l1}, {l2}, {l3}, {l4} and area: {stamp_square}")
-                    # if stamp_square < vol1//4:
-                    standard_frames[stamp_key] = (stamp_loop, stamp_square)
-                    standard_frames = dict(itertools.islice(sorted(standard_frames.items(), key=lambda item: item[1][1], reverse=True), 0, 2))
+                    if stamp_square < vol1//4:
+                        standard_frames[stamp_key] = (stamp_loop, stamp_square)
+                        standard_frames = dict(itertools.islice(sorted(standard_frames.items(), key=lambda item: item[1][1], reverse=True), 0, 2))
+        if len(standard_frames) < 2:
+            payload_bottom_y, found_line_ix = find_stamp_top_y(indexed_lines, standard_frames, inside_tolerance=10)
+            if payload_bottom_y is not None:
+                print(f"Stamp top y-coordinate: {payload_bottom_y}")
+                stamp = find_largest_frame_below_y(main_frames, payload_bottom_y, inclusive=False)
+                if stamp is not None:
+                    stamp_key, (stamp_loop, stamp_square) = stamp
+                    l1 = get_edge_length(stamp_loop[0][1], stamp_loop[1][1])
+                    l2 = get_edge_length(stamp_loop[1][1], stamp_loop[2][1])
+                    l3 = get_edge_length(stamp_loop[2][1], stamp_loop[3][1])
+                    l4 = get_edge_length(stamp_loop[3][1], stamp_loop[0][1])
+                    print(f"Found stamp frame with edges: {l1}, {l2}, {l3}, {l4} and area: {stamp_square}")
+                    if stamp_square < vol1//4:
+                        standard_frames[stamp_key] = (stamp_loop, stamp_square)
+                        standard_frames = dict(itertools.islice(sorted(standard_frames.items(), key=lambda item: item[1][1], reverse=True), 0, 2))
     
     # if raw_lines:
     #     for l in raw_lines:
