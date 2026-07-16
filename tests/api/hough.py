@@ -1,6 +1,8 @@
 import sys
 import os
-from turtle import right
+
+from PIL import Image
+from cv2.typing import MatLike
 os.environ["QT_QPA_FONTDIR"] = "/usr/share/fonts/truetype/dejavu/"
 import cv2 as cv
 import numpy as np
@@ -917,15 +919,20 @@ def calc_most_probable_skew_angle(
 
 def main(argv):
     
-    default_file = 'sudoku.png'
-    filename = argv[0] if len(argv) > 0 else default_file
     # Loads an image
-    src = cv.imread(cv.samples.findFile(filename), cv.IMREAD_GRAYSCALE)
+    src: MatLike | None = None
+    if len(argv) > 0:
+        src = cv.imread(cv.samples.findFile(argv[0]), cv.IMREAD_GRAYSCALE)
     # Check if image is loaded fine
     if src is None:
         print ('Error opening image!')
-        print ('Usage: hough_lines.py [image_name -- default ' + default_file + '] \n')
+        print ('Usage: hough.py <image_file>  \n')
         return -1
+
+    with Image.open(argv[0]) as img:
+        # returns a tuple like (horizontal_dpi, vertical_dpi)
+        dpi = img.info.get("dpi")
+    print(f"DPI Resolution: {dpi}")
     
     h_img, w_img = src.shape[:2]
     border_stripe_h = int(h_img * 0.1)  # 10% of image height

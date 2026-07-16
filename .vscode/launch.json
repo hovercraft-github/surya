@@ -5,16 +5,39 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "stamp_frame",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "tests/api/stamp_frame.py",
+            "console": "integratedTerminal",
+            "env": {
+                "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ/Пример2/"
+            },
+            // "args": ["/home/al/prj/ITSumma/NPZ/пример5/РД-400-18-АС-48/fig-1.png"]
+            // "args": ["/home/al/prj/ITSumma/NPZ/пример5/РД-400-18-АС-48/large-fig-2.png"]
+            // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p36.png"
+            // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p57.png"
+            // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p54.png"
+            // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p56.png"
+            "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p1.png"
+            // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p2.png"
+            // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p3.png"
+            // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p4.png"
+            // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p5.png"
+        },
+        {
             "name": "hough",
             "type": "debugpy",
             "request": "launch",
             "program": "tests/api/hough.py",
             "console": "integratedTerminal",
+            // "args": ["/home/al/prj/ITSumma/NPZ/пример5/РД-400-18-АС-48/fig-1.png"]
+            // "args": ["/home/al/prj/ITSumma/NPZ/пример5/РД-400-18-АС-48/large-fig-2.png"]
             // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p36.png"
-            "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p57.png"
+            // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p57.png"
             // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p54.png"
             // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p56.png"
-            // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p1.png"
+            "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p1.png"
             // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p2.png"
             // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p3.png"
             // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p4.png"
