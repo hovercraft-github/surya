@@ -6,7 +6,11 @@ implementation in [`crown/stamp_frame.py`](crown/stamp_frame.py).
 
 Usage:
 
-    python tests/api/stamp_frame.py <image_file>
+    python tests/api/stamp_frames_debug.py [<image_file>] \
+        [--show-original] [--show-indexed-lines] [--show-closed-loops]
+
+When no ``<image_file>`` is given on the command line, a graphical file
+selection dialog (Tkinter) is shown so the user can pick one interactively.
 
 It loads the source page, runs [`find_stamp_frames()`](crown/stamp_frame.py:773)
 (and [`split_frames()`](crown/stamp_frame.py:1123)) on it, then renders the
@@ -14,6 +18,7 @@ detected frames on top of the (possibly deskewed) image and opens a window so
 the result can be inspected visually, just like the POC.
 """
 
+import argparse
 import sys
 import os
 
@@ -30,6 +35,33 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from crown.stamp_frame import find_stamp_frames, split_frames  # noqa: E402
 
 
+def _pick_image_file() -> str | None:
+    """Open a Tkinter file-selection dialog and return the chosen path.
+
+    Returns ``None`` if the user cancels the dialog or if no Tkinter backend
+    is available (e.g. on a headless system).
+    """
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ImportError:
+        print("Tkinter is not available; cannot show a file selection dialog.")
+        return None
+
+    # A hidden root window so the dialog does not show an extra empty window.
+    root = tk.Tk()
+    root.withdraw()
+    path = filedialog.askopenfilename(
+        title="Select an image file",
+        filetypes=[
+            ("Image files", "*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.gif"),
+            ("All files", "*.*"),
+        ],
+    )
+    root.destroy()
+    return path or None
+
+
 def _pil_to_cv_rgb(image: Image.Image) -> np.ndarray:
     """Convert a PIL RGB image to an OpenCV BGR MatLike."""
     arr = np.array(image.convert("RGB"))
@@ -38,17 +70,56 @@ def _pil_to_cv_rgb(image: Image.Image) -> np.ndarray:
 
 
 def main(argv):
-    if len(argv) == 0:
+    parser = argparse.ArgumentParser(
+        description="Visual test driver for the production stamp-frame detector.",
+    )
+    parser.add_argument(
+        "image_file",
+        nargs="?",
+        default=None,
+        help="Path to the image file to process. If omitted, a file selection "
+        "dialog is shown.",
+    )
+    parser.add_argument(
+        "--show-original",
+        action="store_true",
+        default=True,
+        help="Render the detected frames on top of the (deskewed) source image "
+        "instead of a black canvas (default: enabled).",
+    )
+    parser.add_argument(
+        "--show-indexed-lines",
+        action="store_true",
+        default=False,
+        help="Overlay the indexed Hough line segments used by the detector.",
+    )
+    parser.add_argument(
+        "--show-closed-loops",
+        action="store_true",
+        default=False,
+        help="Overlay the bounding boxes of all closed loops found by the detector.",
+    )
+    args = parser.parse_args(argv)
+
+    image_path = args.image_file
+    if image_path is None:
+        image_path = _pick_image_file()
+    if not image_path:
         print("Error: no image file given!")
-        print("Usage: stamp_frame.py <image_file>\n")
+        print("Usage: stamp_frames_debug.py <image_file> "
+              "[--show-original] [--show-indexed-lines] [--show-closed-loops]\n")
         return -1
 
-    image_path = argv[0]
+    show_original = args.show_original
+    show_indexed_lines = args.show_indexed_lines
+    show_closed_loops = args.show_closed_loops
+
     try:
         src_pil = Image.open(image_path)
     except (FileNotFoundError, OSError) as exc:
         print(f"Error opening image: {exc}")
-        print("Usage: stamp_frame.py <image_file>\n")
+        print("Usage: stamp_frames_debug.py <image_file> "
+              "[--show-original] [--show-indexed-lines] [--show-closed-loops]\n")
         return -1
 
     with Image.open(image_path) as img:
@@ -83,9 +154,12 @@ def main(argv):
     # --- Visualization --------------------------------------------------------
     deskewed_cv = _pil_to_cv_rgb(deskewed)
     h_img, w_img = deskewed_cv.shape[:2]
-    canvas = np.zeros((h_img, w_img, 3), dtype=np.uint8)
+    if show_original:
+        canvas = deskewed_cv
+    else:
+        canvas = np.zeros((h_img, w_img, 3), dtype=np.uint8)
 
-    if indexed_lines:
+    if indexed_lines and show_indexed_lines:
         for i, l in indexed_lines.items():
             color = (randint(80,200),randint(80,200),randint(80,200))
             # if i in found_line_ix:
@@ -107,28 +181,15 @@ def main(argv):
             canvas, label, (int(x1) + 4, int(y1) + 30),
             cv.FONT_HERSHEY_SIMPLEX, 0.9, color, 2, cv.LINE_AA,
         )
-    # if isinstance(closed_loops, dict):
-    #     for frame in closed_loops.values():
-    #         loop, area = frame
-    #         x_coords = [point[1][0] for point in loop]
-    #         y_coords = [point[1][1] for point in loop]
-    #         x1, y1 = min(x_coords), min(y_coords)
-    #         x2, y2 = max(x_coords), max(y_coords)
-    #         color = (0, 255, 255)  # main frames in yellow
-    #         cv.rectangle(canvas, (int(x1), int(y1)), (int(x2), int(y2)), color, 4, cv.LINE_AA)
-
-    # Draw the metadata-interior crop (if any) in the top-left for reference.
-    # if metadata_interior is not None:
-    #     thumb = _pil_to_cv_rgb(metadata_interior)
-    #     th = min(thumb.shape[0], h_img // 3)
-    #     tw = int(thumb.shape[1] * th / max(thumb.shape[0], 1))
-    #     thumb = cv.resize(thumb, (tw, th))
-    #     canvas[0:th, 0:tw] = thumb
-    #     cv.rectangle(canvas, (0, 0), (tw, th), (255, 255, 255), 2, cv.LINE_AA)
-    #     cv.putText(
-    #         canvas, "metadata_interior", (4, th + 22),
-    #         cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv.LINE_AA,
-    #     )
+    if isinstance(closed_loops, dict) and show_closed_loops:
+        for frame in closed_loops.values():
+            loop, area = frame
+            x_coords = [point[1][0] for point in loop]
+            y_coords = [point[1][1] for point in loop]
+            x1, y1 = min(x_coords), min(y_coords)
+            x2, y2 = max(x_coords), max(y_coords)
+            color = (0, 255, 255)  # main frames in yellow
+            cv.rectangle(canvas, (int(x1), int(y1)), (int(x2), int(y2)), color, 4, cv.LINE_AA)
 
     cv.namedWindow("Stamp Frames", cv.WINDOW_AUTOSIZE)
     new_height = 900

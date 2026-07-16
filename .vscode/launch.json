@@ -8,7 +8,7 @@
             "name": "stamp_frame",
             "type": "debugpy",
             "request": "launch",
-            "program": "tests/api/stamp_frame.py",
+            "program": "tests/api/stamp_frames_debug.py",
             "console": "integratedTerminal",
             "env": {
                 "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ/Пример2/"
