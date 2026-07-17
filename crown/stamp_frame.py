@@ -45,6 +45,8 @@ import itertools
 from dataclasses import dataclass
 
 import os
+import time
+from tracemalloc import start
 import cv2 as cv
 import numpy as np
 from PIL import Image, ImageOps
@@ -96,6 +98,24 @@ def _seg_bottom_y(x1: int, y1: int, x2: int, y2: int) -> int:
 def _seg_top_y(x1: int, y1: int, x2: int, y2: int) -> int:
     """Smaller (upper) y-coordinate of a segment."""
     return min(y1, y2)
+
+
+def _normalize_segment(x1: int, y1: int, x2: int, y2: int) -> list[int]:
+    """Normalize a segment so its first endpoint is the canonical anchor.
+
+    For a vertical segment (``|dy| >= |dx|``) the first endpoint carries the
+    uppermost (smallest y) point; for a horizontal segment (``|dx| > |dy|``)
+    the first endpoint carries the leftmost (smallest x) point.  The returned
+    list is ``[x1, y1, x2, y2]`` with the endpoints swapped when needed.
+    """
+    is_vertical = abs(y2 - y1) >= abs(x2 - x1)
+    if is_vertical:
+        if y1 > y2:
+            return [x2, y2, x1, y1]
+    else:
+        if x1 > x2:
+            return [x2, y2, x1, y1]
+    return [x1, y1, x2, y2]
 
 
 # ---------------------------------------------------------------------------
@@ -150,8 +170,9 @@ def _calc_point2seg_distance(
     return 0, int(d_ort), "P"
 
 
-def _merge_collinear_lines(
+def _merge_collinear_lines_hv(
     lines: np.ndarray | list[list[int]],
+    is_horizontal: bool,
     ort_tolerance: float = 10.0,
     tang_tolerance: float = 200.0,
     angle_tolerance_deg: float = 2.0,
@@ -168,16 +189,16 @@ def _merge_collinear_lines(
     if lines is None or len(lines) == 0:
         return []
 
-    cleaned_lines = sorted(
-        np.array(lines).reshape(-1, 4).tolist(),
-        key=lambda x: (int(x[0]), int(x[1])),
-    )
-    min_length = tang_tolerance / 2
-    cleaned_lines = [
-        line
-        for line in cleaned_lines
-        if np.hypot(line[2] - line[0], line[3] - line[1]) >= min_length
-    ]
+    if is_horizontal:
+        cleaned_lines = sorted(
+            [_normalize_segment(*seg) for seg in np.array(lines).reshape(-1, 4).tolist()],
+            key=lambda x: (int(x[0]), int(x[1])),
+        )
+    else:
+        cleaned_lines = sorted(
+            [_normalize_segment(*seg) for seg in np.array(lines).reshape(-1, 4).tolist()],
+            key=lambda x: (int(x[1]), int(x[0])),
+        )
     absorbed = np.zeros(len(cleaned_lines), dtype=bool)
 
     for i, line1 in enumerate(cleaned_lines):
@@ -185,17 +206,13 @@ def _merge_collinear_lines(
             continue
 
         x1, y1, x2, y2 = line1
-        master_is_hor = abs(y2 - y1) < abs(x2 - x1)
-        angle1 = 0 if master_is_hor else np.pi / 2
+        angle1 = 0 if is_horizontal else np.pi / 2
 
         for j, line2 in enumerate(cleaned_lines):
-            if j == i:
+            if j <= i or absorbed[j]:
                 continue
 
             x3, y3, x4, y4 = line2
-            slave_is_hor = abs(y4 - y3) < abs(x4 - x3)
-            if slave_is_hor != master_is_hor:
-                continue
             angle2 = np.arctan2(abs(y4 - y3), abs(x4 - x3))
 
             angle_diff = min(
@@ -244,6 +261,42 @@ def _merge_collinear_lines(
             absorbed[j] = True
 
     return [line for i, line in enumerate(cleaned_lines) if not absorbed[i]]
+
+
+def _merge_collinear_lines(
+    lines: np.ndarray | list[list[int]],
+    ort_tolerance: float = 10.0,
+    tang_tolerance: float = 200.0,
+    angle_tolerance_deg: float = 2.0,
+) -> list[list[int]]:
+    """Merge overlapping, collinear line segments.
+
+    Two segments are merged when they share the same dominant orientation
+    (both horizontal or both vertical), their angular difference is within
+    ``angle_tolerance_deg``, and at least one endpoint of one segment lies
+    within ``ort_tolerance`` pixels perpendicular and ``tang_tolerance`` pixels
+    tangential of the other segment.  The merged segment is the longest
+    candidate spanning the two segments' endpoints.
+    """
+    if lines is None or len(lines) == 0:
+        return []
+
+    start = time.perf_counter()
+    min_length = tang_tolerance / 2
+    cleaned_segments = [seg for seg in np.array(lines).reshape(-1, 4).tolist()
+                     if np.hypot(seg[2] - seg[0], seg[3] - seg[1]) >= min_length]
+    horizontal_lines = [seg for seg in cleaned_segments if abs(seg[3] - seg[1]) < abs(seg[2] - seg[0])]
+    vertical_lines = [seg for seg in cleaned_segments if abs(seg[3] - seg[1]) >= abs(seg[2] - seg[0])]
+    merged_horizontal = _merge_collinear_lines_hv(
+        horizontal_lines, True, ort_tolerance, tang_tolerance, angle_tolerance_deg
+    )
+    merged_vertical = _merge_collinear_lines_hv(
+        vertical_lines, False, ort_tolerance, tang_tolerance, angle_tolerance_deg
+    )
+    ret: list[list[int]] = merged_horizontal + merged_vertical
+    end = time.perf_counter()
+    print(f"_merge_collinear_lines took {end - start:.6f} seconds")
+    return ret
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +489,7 @@ def _find_all_segment_intersections(
     indexed_linesseg: dict[int, list[int]],
     tolerance: float = 5.0,
 ) -> dict[frozenset[int], tuple[int, int]]:
+    start = time.perf_counter()
     intersections: dict[frozenset[int], tuple[int, int]] = {}
     for ix1, ix2 in itertools.combinations(indexed_linesseg.keys(), 2):
         key = frozenset({ix1, ix2})
@@ -447,6 +501,8 @@ def _find_all_segment_intersections(
         if intersection is not None:
             _, x, y = intersection
             intersections[key] = (x, y)
+    end = time.perf_counter()
+    print(f"_find_all_segment_intersections took {end - start:.6f} seconds")
     return intersections
 
 
@@ -462,6 +518,7 @@ def _deduplicate_segments(
     """Collapse near-identical Hough segments into single averaged segments."""
     if (isinstance(segments, np.ndarray) and segments.size == 0) or (not isinstance(segments, np.ndarray) and not segments):
         return []
+    start = time.perf_counter()
     segments = np.array(segments).reshape(-1, 4).tolist()
 
     def endpoints_close(a: list[int], b: list[int]) -> bool:
@@ -501,6 +558,8 @@ def _deduplicate_segments(
         averaged.append(
             [int(round(sx1)), int(round(sy1)), int(round(sx2)), int(round(sy2))]
         )
+    end = time.perf_counter()
+    print(f"_deduplicate_segments took {end - start:.6f} seconds")
     return averaged
 
 
@@ -553,6 +612,7 @@ def _find_all_closed_loops(
     square_threshold: int | None = None,
 ) -> dict[frozenset[int], tuple[list[tuple[int, tuple[int, int]]], int]]:
     """Finds all closed loops formed by the line segments."""
+    start = time.perf_counter()
     # Build adjacency list for the graph of line segments
     adjacency: dict[int, dict[int, tuple[int, int]]] = {
         ix: dict() for ix in indexed_linesseg.keys()
@@ -601,6 +661,8 @@ def _find_all_closed_loops(
 
     for node in indexed_linesseg.keys():
         dfs(node, node, set(), [])
+    end = time.perf_counter()
+    print(f"_find_all_closed_loops took {end - start:.6f} seconds")
 
     return unique_loops
 
@@ -920,6 +982,7 @@ def find_stamp_frames(
         src_gray: np.ndarray, rho: float, theta_step_deg: float
     ) -> list[list[int]]:
         # hough_src = cv.Canny(src_gray, canny_low, canny_high, None, canny_aperture)
+        start = time.perf_counter()
         hough_src = src_gray.copy()
         if invert_before_hough:
             inverted = cv.bitwise_not(hough_src)
@@ -933,6 +996,7 @@ def find_stamp_frames(
             hough_min_line_length,
             hough_max_line_gap,
         )
+        print(f"HoughLinesP took {time.perf_counter() - start:.6f} seconds")
         if lines_p is None:
             return []
         lines_p = _deduplicate_segments(lines_p, tolerance=dedup_tolerance)
@@ -943,6 +1007,8 @@ def find_stamp_frames(
             angle_tolerance_deg=merge_angle_tolerance_deg,
         )
         # merged = _deduplicate_segments(merged, tolerance=dedup_tolerance)
+        end = time.perf_counter()
+        print(f"_hough_pass took {end - start:.6f} seconds")
         return merged
 
     gray_pil = rgb.convert("L")
