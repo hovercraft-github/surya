@@ -617,13 +617,40 @@ def get_edge_length(start_xy: tuple[int, int], end_xy: tuple[int, int]) -> int:
     return max(abs(x2 - x1), abs(y2 - y1))
 
 
+def _loop_bottom_right_corner(
+    loop: list[tuple[int, tuple[int, int]]],
+) -> tuple[int, int]:
+    """Bottom-right corner of a single loop.
+
+    The bottom-right corner is the corner point with the greatest ``x + y``
+    sum; ties are broken by the greatest ``x`` and then the greatest ``y``.
+    """
+    best_point = loop[0][1]
+    best_key = (best_point[0] + best_point[1], best_point[0], best_point[1])
+    for _, (x, y) in loop:
+        key = (x + y, x, y)
+        if key > best_key:
+            best_key = key
+            best_point = (x, y)
+    return best_point
+
+
 def _find_bottom_right_corner_of_loops(
     closed_loops: dict[frozenset, tuple[list[tuple[int, tuple[int, int]]], int]],
+    edge_len_threshold: int = 100,
+    corner_tolerance: float = 20.0,
 ) -> tuple[int, int] | None:
     """Most bottom-right corner among all loops' corner points.
 
     The "most bottom-right" corner is the one with the greatest ``x + y`` sum;
     ties are broken by the greatest ``x`` and then the greatest ``y``.
+
+    After the candidate point is found, every loop whose own bottom-right
+    corner (see [`_loop_bottom_right_corner()`](crown/stamp_frame.py)) lies
+    within ``edge_len_threshold`` pixels of the candidate is collected.  When
+    more than one such loop exists and their bottom-right corners all coincide
+    within ``corner_tolerance`` pixels of each other, the returned point is the
+    average of those corners; otherwise the single candidate point is returned.
     """
     best_point: tuple[int, int] | None = None
     best_key: tuple[int, int, int] | None = None
@@ -633,6 +660,35 @@ def _find_bottom_right_corner_of_loops(
             if best_key is None or key > best_key:
                 best_key = key
                 best_point = (x, y)
+    if best_point is None:
+        return None
+
+    # Collect the bottom-right corner of every loop that lies within
+    # ``edge_len_threshold`` of the candidate point.
+    nearby_corners: list[tuple[int, int]] = []
+    for loop, _ in closed_loops.values():
+        corner = _loop_bottom_right_corner(loop)
+        if np.hypot(corner[0] - best_point[0], corner[1] - best_point[1]) <= edge_len_threshold:
+            nearby_corners.append(corner)
+
+    if len(nearby_corners) > 1:
+        # Require all collected corners to coincide within ``corner_tolerance``.
+        max_sq = corner_tolerance * corner_tolerance
+        all_coincide = True
+        for i in range(len(nearby_corners)):
+            for j in range(i + 1, len(nearby_corners)):
+                dx = nearby_corners[i][0] - nearby_corners[j][0]
+                dy = nearby_corners[i][1] - nearby_corners[j][1]
+                if dx * dx + dy * dy > max_sq:
+                    all_coincide = False
+                    break
+            if not all_coincide:
+                break
+        if all_coincide:
+            ax = sum(c[0] for c in nearby_corners) / len(nearby_corners)
+            ay = sum(c[1] for c in nearby_corners) / len(nearby_corners)
+            return (int(round(ax)), int(round(ay)))
+
     return best_point
 
 
@@ -1125,7 +1181,11 @@ def find_stamp_frames(
         square_threshold=square_threshold,
     )
 
-    origin_point = _find_bottom_right_corner_of_loops(closed_loops)
+    origin_point = _find_bottom_right_corner_of_loops(
+        closed_loops,
+        edge_len_threshold=edge_len_threshold,
+        corner_tolerance=corner_tolerance,
+    )
     origin_points = {origin_point} if origin_point is not None else set()
     main_frames = {
         ix: val
