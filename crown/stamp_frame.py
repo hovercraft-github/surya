@@ -511,35 +511,53 @@ def _find_all_segment_intersections(
 # ---------------------------------------------------------------------------
 
 
-def _deduplicate_segments(
+def _deduplicate_segments_hv(
     segments: list[list[int]] | np.ndarray,
+    is_horizontal: bool,
     tolerance: float = 5.0,
 ) -> list[list[int]]:
-    """Collapse near-identical Hough segments into single averaged segments."""
-    if (isinstance(segments, np.ndarray) and segments.size == 0) or (not isinstance(segments, np.ndarray) and not segments):
+    """Collapse near-identical Hough segments of a single orientation.
+
+    ``segments`` are expected to share the same dominant orientation (all
+    horizontal when ``is_horizontal`` is True, all vertical otherwise).  Each
+    segment is first normalized with [`_normalize_segment()`](crown/stamp_frame.py:103)
+    so that the first endpoint is the canonical anchor (leftmost for
+    horizontal, uppermost for vertical).  Because matching segments then share
+    the same endpoint ordering, [`_endpoints_close()`](crown/stamp_frame.py)
+    only needs to compare the first endpoints to the first endpoints and the
+    second to the second -- no second cross-ordered distance computation is
+    required.
+    """
+    if segments is None or len(segments) == 0:
         return []
-    start = time.perf_counter()
-    segments = np.array(segments).reshape(-1, 4).tolist()
+
+    tol_sq = tolerance * tolerance
+    if is_horizontal:
+        cleaned = sorted(
+            [_normalize_segment(*seg) for seg in np.array(segments).reshape(-1, 4).tolist()],
+            key=lambda x: (int(x[1]), int(x[0])),
+        )
+    else:
+        cleaned = sorted(
+            [_normalize_segment(*seg) for seg in np.array(segments).reshape(-1, 4).tolist()],
+            key=lambda x: (int(x[0]), int(x[1])),
+        )
 
     def endpoints_close(a: list[int], b: list[int]) -> bool:
         ax1, ay1, ax2, ay2 = a
         bx1, by1, bx2, by2 = b
+        if abs((ax1 - bx1)) > tolerance or abs((ay1 - by1)) > tolerance:
+            return False
         d1 = (ax1 - bx1) ** 2 + (ay1 - by1) ** 2
+        if d1 > tol_sq:
+            return False
+        if abs((ax2 - bx2)) > tolerance or abs((ay2 - by2)) > tolerance:
+            return False
         d2 = (ax2 - bx2) ** 2 + (ay2 - by2) ** 2
-        if d1 <= tolerance * tolerance and d2 <= tolerance * tolerance:
-            return True
-        d1 = (ax1 - bx2) ** 2 + (ay1 - by2) ** 2
-        d2 = (ax2 - bx1) ** 2 + (ay2 - by1) ** 2
-        return d1 <= tolerance * tolerance and d2 <= tolerance * tolerance
-
-    def canonical(seg: list[int]) -> list[int]:
-        x1, y1, x2, y2 = seg
-        if (x1, y1) > (x2, y2):
-            return [x2, y2, x1, y1]
-        return [x1, y1, x2, y2]
+        return d2 <= tol_sq
 
     groups: list[list[list[int]]] = []
-    for seg in segments:
+    for seg in cleaned:
         for group in groups:
             if endpoints_close(group[0], seg):
                 group.append(seg)
@@ -550,17 +568,42 @@ def _deduplicate_segments(
     averaged: list[list[int]] = []
     for group in groups:
         n = len(group)
-        canon = [canonical(s) for s in group]
-        sx1 = sum(s[0] for s in canon) / n
-        sy1 = sum(s[1] for s in canon) / n
-        sx2 = sum(s[2] for s in canon) / n
-        sy2 = sum(s[3] for s in canon) / n
+        sx1 = sum(s[0] for s in group) / n
+        sy1 = sum(s[1] for s in group) / n
+        sx2 = sum(s[2] for s in group) / n
+        sy2 = sum(s[3] for s in group) / n
         averaged.append(
             [int(round(sx1)), int(round(sy1)), int(round(sx2)), int(round(sy2))]
         )
+    return averaged
+
+
+def _deduplicate_segments(
+    segments: list[list[int]] | np.ndarray,
+    tolerance: float = 5.0,
+) -> list[list[int]]:
+    """Collapse near-identical Hough segments into single averaged segments.
+
+    Splits the input into horizontal and vertical segments and deduplicates
+    each orientation separately via [`_deduplicate_segments_hv()`](crown/stamp_frame.py),
+    mirroring the structure of [`_merge_collinear_lines()`](crown/stamp_frame.py:266).
+    """
+    if (isinstance(segments, np.ndarray) and segments.size == 0) or (not isinstance(segments, np.ndarray) and not segments):
+        return []
+    start = time.perf_counter()
+    cleaned_segments = np.array(segments).reshape(-1, 4).tolist()
+    horizontal_segments = [seg for seg in cleaned_segments if abs(seg[3] - seg[1]) < abs(seg[2] - seg[0])]
+    vertical_segments = [seg for seg in cleaned_segments if abs(seg[3] - seg[1]) >= abs(seg[2] - seg[0])]
+    dedup_horizontal = _deduplicate_segments_hv(
+        horizontal_segments, True, tolerance
+    )
+    dedup_vertical = _deduplicate_segments_hv(
+        vertical_segments, False, tolerance
+    )
+    ret: list[list[int]] = dedup_horizontal + dedup_vertical
     end = time.perf_counter()
     print(f"_deduplicate_segments took {end - start:.6f} seconds")
-    return averaged
+    return ret
 
 
 # ---------------------------------------------------------------------------
