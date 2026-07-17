@@ -113,6 +113,13 @@ def main(argv):
         default=False,
         help="Overlay the bounding boxes of all closed loops found by the detector.",
     )
+    parser.add_argument(
+        "--show-main-frames",
+        # action="store_true",
+        type=str_to_bool,
+        default=False,
+        help="Overlay the bounding boxes of all main frames found by the detector.",
+    )
     args = parser.parse_args(argv)
 
     image_path = args.image_file
@@ -127,6 +134,7 @@ def main(argv):
     show_original = args.show_original
     show_indexed_lines = args.show_indexed_lines
     show_closed_loops = args.show_closed_loops
+    show_main_frames = args.show_main_frames
 
     try:
         src_pil = Image.open(image_path)
@@ -141,7 +149,7 @@ def main(argv):
     print(f"DPI Resolution: {dpi}")
 
     # --- Production pipeline -------------------------------------------------
-    frames, corner_tolerance, deskewed, skew_angle, closed_loops, main_frames, indexed_lines = find_stamp_frames(src_pil,
+    frames, corner_tolerance, deskewed, skew_angle, closed_loops, main_frames, indexed_lines, origin_point = find_stamp_frames(src_pil,
                                         max_frames=2,
                                         # skew_min_angle_deg=2.1
                                         )
@@ -168,6 +176,9 @@ def main(argv):
     # --- Visualization --------------------------------------------------------
     deskewed_cv = _pil_to_cv_rgb(deskewed)
     h_img, w_img = deskewed_cv.shape[:2]
+    new_height = 900
+    aspect_ratio = new_height / h_img
+    line_thickness = max(1, int(round(2 / aspect_ratio)))
     if show_original:
         canvas = deskewed_cv
     else:
@@ -189,7 +200,7 @@ def main(argv):
     for i, frame in enumerate(frames):
         x1, y1, x2, y2 = frame.bbox
         color = colors[i % len(colors)]
-        cv.rectangle(canvas, (int(x1), int(y1)), (int(x2), int(y2)), color, 4, cv.LINE_AA)
+        cv.rectangle(canvas, (int(x1), int(y1)), (int(x2), int(y2)), color, line_thickness, cv.LINE_AA)
         label = f"frame{i}: {frame.area}"
         cv.putText(
             canvas, label, (int(x1) + 4, int(y1) + 30),
@@ -203,11 +214,29 @@ def main(argv):
             x1, y1 = min(x_coords), min(y_coords)
             x2, y2 = max(x_coords), max(y_coords)
             color = (0, 255, 255)  # main frames in yellow
-            cv.rectangle(canvas, (int(x1), int(y1)), (int(x2), int(y2)), color, 4, cv.LINE_AA)
+            cv.rectangle(canvas, (int(x1), int(y1)), (int(x2), int(y2)), color, line_thickness, cv.LINE_AA)
+    if isinstance(main_frames, dict) and show_main_frames:
+        for frame in main_frames.values():
+            loop, area = frame
+            x_coords = [point[1][0] for point in loop]
+            y_coords = [point[1][1] for point in loop]
+            x1, y1 = min(x_coords), min(y_coords)
+            x2, y2 = max(x_coords), max(y_coords)
+            color = (255, 255, 0)  # main frames in cyan
+            cv.rectangle(canvas, (int(x1), int(y1)), (int(x2), int(y2)), color, line_thickness, cv.LINE_AA)
+
+    # Draw the detected page origin point as a small cross inside a circle.
+    if origin_point is not None:
+        ox, oy = int(origin_point[0]), int(origin_point[1])
+        marker_color = (255, 0, 255)  # magenta (BGR)
+        marker_radius = max(8, int(round(10 / aspect_ratio)))
+        cross_half = max(4, int(round(6 / aspect_ratio)))
+        marker_thick = max(1, int(round(2 / aspect_ratio)))
+        cv.circle(canvas, (ox, oy), marker_radius, marker_color, marker_thick, cv.LINE_AA)
+        cv.line(canvas, (ox - cross_half, oy), (ox + cross_half, oy), marker_color, marker_thick, cv.LINE_AA)
+        cv.line(canvas, (ox, oy - cross_half), (ox, oy + cross_half), marker_color, marker_thick, cv.LINE_AA)
 
     cv.namedWindow("Stamp Frames", cv.WINDOW_AUTOSIZE)
-    new_height = 900
-    aspect_ratio = new_height / h_img
     new_width = int(w_img * aspect_ratio)
     resized = cv.resize(canvas, (new_width, new_height))
     cv.imshow("Stamp Frames", resized)

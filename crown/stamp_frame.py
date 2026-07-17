@@ -635,6 +635,31 @@ def _loop_bottom_right_corner(
     return best_point
 
 
+def _frame_sort_key(
+    frame: tuple[list[tuple[int, tuple[int, int]]], int],
+    origin_point: tuple[int, int] | None,
+    corner_tolerance: float,
+) -> float:
+    """Sort key for ranking detected frames by area with an origin bonus.
+
+    The base key is the frame's area (``frame[1]``).  Frames whose bottom-right
+    corner is close to ``origin_point`` get a multiplicative boost of up to
+    15%: a corner exactly at ``origin_point`` (distance 0) receives the full
+    1.15 factor, the factor decreases linearly to 1.0 as the distance grows to
+    ``corner_tolerance``, and stays at 1.0 for any larger distance.  When
+    ``origin_point`` is ``None`` the plain area is returned.
+    """
+    area = frame[1]
+    if origin_point is None or corner_tolerance <= 0:
+        return float(area)
+    corner = _loop_bottom_right_corner(frame[0])
+    dist = float(np.hypot(corner[0] - origin_point[0], corner[1] - origin_point[1]))
+    if dist >= corner_tolerance:
+        return float(area)
+    boost = 1.0 + 0.15 * (1.0 - dist / corner_tolerance)
+    return area * boost
+
+
 def _find_bottom_right_corner_of_loops(
     closed_loops: dict[frozenset, tuple[list[tuple[int, tuple[int, int]]], int]],
     edge_len_threshold: int = 100,
@@ -647,10 +672,11 @@ def _find_bottom_right_corner_of_loops(
 
     After the candidate point is found, every loop whose own bottom-right
     corner (see [`_loop_bottom_right_corner()`](crown/stamp_frame.py)) lies
-    within ``edge_len_threshold`` pixels of the candidate is collected.  When
-    more than one such loop exists and their bottom-right corners all coincide
-    within ``corner_tolerance`` pixels of each other, the returned point is the
-    average of those corners; otherwise the single candidate point is returned.
+    within ``edge_len_threshold`` pixels of the candidate is collected.  The
+    collected corners are then clustered with ``corner_tolerance`` as the
+    cluster radius: the largest cluster is selected and its centroid (the
+    average of its members) is returned as the most probable origin point.
+    When only one corner is collected, the candidate point itself is returned.
     """
     best_point: tuple[int, int] | None = None
     best_key: tuple[int, int, int] | None = None
@@ -672,21 +698,41 @@ def _find_bottom_right_corner_of_loops(
             nearby_corners.append(corner)
 
     if len(nearby_corners) > 1:
-        # Require all collected corners to coincide within ``corner_tolerance``.
+        # Cluster the collected corners using ``corner_tolerance`` as the
+        # cluster radius and pick the most populated cluster.  Greedy
+        # single-linkage clustering: a corner joins a cluster when it is within
+        # ``corner_tolerance`` of any member already in it.
         max_sq = corner_tolerance * corner_tolerance
-        all_coincide = True
-        for i in range(len(nearby_corners)):
-            for j in range(i + 1, len(nearby_corners)):
-                dx = nearby_corners[i][0] - nearby_corners[j][0]
-                dy = nearby_corners[i][1] - nearby_corners[j][1]
-                if dx * dx + dy * dy > max_sq:
-                    all_coincide = False
+        clusters: list[list[tuple[int, int]]] = []
+        for corner in nearby_corners:
+            placed = False
+            for cluster in clusters:
+                for member in cluster:
+                    dx = corner[0] - member[0]
+                    dy = corner[1] - member[1]
+                    if dx * dx + dy * dy <= max_sq:
+                        cluster.append(corner)
+                        placed = True
+                        break
+                if placed:
                     break
-            if not all_coincide:
-                break
-        if all_coincide:
-            ax = sum(c[0] for c in nearby_corners) / len(nearby_corners)
-            ay = sum(c[1] for c in nearby_corners) / len(nearby_corners)
+            if not placed:
+                clusters.append([corner])
+        # Select the largest cluster; ties broken by the cluster whose centroid
+        # is closest to the candidate point.
+        best_cluster: list[tuple[int, int]] | None = None
+        best_cluster_key: tuple[int, float] | None = None
+        for cluster in clusters:
+            cx = sum(c[0] for c in cluster) / len(cluster)
+            cy = sum(c[1] for c in cluster) / len(cluster)
+            dist = (cx - best_point[0]) ** 2 + (cy - best_point[1]) ** 2
+            key = (len(cluster), -dist)
+            if best_cluster_key is None or key > best_cluster_key:
+                best_cluster_key = key
+                best_cluster = cluster
+        if best_cluster is not None and len(best_cluster) > 1:
+            ax = sum(c[0] for c in best_cluster) / len(best_cluster)
+            ay = sum(c[1] for c in best_cluster) / len(best_cluster)
             return (int(round(ax)), int(round(ay)))
 
     return best_point
@@ -973,7 +1019,8 @@ def find_stamp_frames(
             float,
             dict[frozenset[int],tuple[list[tuple[int, tuple[int, int]]], int]] | None,
             dict[frozenset[int],tuple[list[tuple[int, tuple[int, int]]], int]] | None,
-            dict[int, list[int]] | None
+            dict[int, list[int]] | None,
+            tuple[int, int] | None
             ]:
     """Detect the standard rectangular stamp frames on a document page.
 
@@ -1160,7 +1207,7 @@ def find_stamp_frames(
         dict(enumerate(lines)) if lines else {}
     )
     if not indexed_lines:
-        return [], corner_tolerance, deskewed, skew_angle, None, None, None
+        return [], corner_tolerance, deskewed, skew_angle, None, None, None, None
 
     outer_lines = {
         ix: seg
@@ -1170,7 +1217,7 @@ def find_stamp_frames(
         )
     }
     if not outer_lines:
-        return [], corner_tolerance, deskewed, skew_angle, None, None, None
+        return [], corner_tolerance, deskewed, skew_angle, None, None, None, None
 
     intersections = _find_all_segment_intersections(
         outer_lines, tolerance=intersection_tolerance
@@ -1193,7 +1240,13 @@ def find_stamp_frames(
         if _path_has_points(val[0], origin_points, tolerance=corner_tolerance)
     }
     main_frames = dict(
-        sorted(main_frames.items(), key=lambda item: item[1][1], reverse=True)
+        sorted(
+            main_frames.items(),
+            key=lambda item: _frame_sort_key(
+                item[1], origin_point, corner_tolerance
+            ),
+            reverse=True,
+        )
     )
     standard_frames = dict(itertools.islice(main_frames.items(), 0, max_frames))
 
@@ -1259,13 +1312,14 @@ def find_stamp_frames(
     frames: list[StampFrame] = []
     for loop, square in standard_frames.values():
         x1, y1, x2, y2 = _loop_bbox(loop)
+        x2, y2 = origin_point if origin_point is not None else (x2, y2)
         frames.append(
             StampFrame(
                 bbox=(int(x1), int(y1), int(x2), int(y2)), area=int(square)
             )
         )
     frames.sort(key=lambda f: f.area, reverse=True)
-    return frames, corner_tolerance, deskewed, skew_angle, closed_loops, main_frames, indexed_lines
+    return frames, corner_tolerance, deskewed, skew_angle, closed_loops, main_frames, indexed_lines, origin_point
 
 
 # ---------------------------------------------------------------------------
@@ -1380,7 +1434,7 @@ def split_frames(
     rgb = image.convert("RGB")
     bg = _background_color(rgb)
 
-    frames, corner_tolerance, deskewed, skew_angle, closed_loops, main_frames, indexed_lines = find_stamp_frames(rgb, max_frames=2)
+    frames, corner_tolerance, deskewed, skew_angle, closed_loops, main_frames, indexed_lines, origin_point = find_stamp_frames(rgb, max_frames=2)
     work = deskewed
     w, h = work.size
 
