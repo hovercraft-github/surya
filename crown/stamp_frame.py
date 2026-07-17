@@ -893,7 +893,7 @@ def find_stamp_frames(
     canny_low: int = 50,
     canny_high: int = 200,
     canny_aperture: int = 3,
-    invert_before_hough: bool = True,
+    invert_before_hough: bool | None = None,
     hough_threshold: int = 100,
     hough_min_line_length: int = 100,
     hough_max_line_gap: int = 20,
@@ -947,7 +947,11 @@ def find_stamp_frames(
         Canny edge detector parameters.
     invert_before_hough:
         When True, run ``cv.bitwise_not`` on the grayscale image before Hough,
-        which suits dark-text-on-light scans.
+        which suits dark-text-on-light scans.  When ``None`` (the default), the
+        document background color is estimated with
+        [`_background_color()`](crown/stamp_frame.py) and the image is inverted
+        automatically when that background is light (luminance above 127),
+        which is the common case for scanned documents.
     hough_threshold, hough_min_line_length, hough_max_line_gap:
         ``cv.HoughLinesP`` parameters.
     dedup_tolerance:
@@ -993,6 +997,15 @@ def find_stamp_frames(
         dpi = image.info.get("dpi", (300, 300))
     rgb = image.convert("RGB")
     w_img, h_img = rgb.size
+
+    # Auto-detect whether to invert before Hough when the caller did not
+    # specify.  A light document background (the common scan case) means the
+    # frame lines are dark, so inverting yields bright lines on a dark
+    # background, which is what the Hough/Canny pipeline expects.
+    if invert_before_hough is None:
+        bg = _background_color(rgb)
+        bg_luminance = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
+        invert_before_hough = bg_luminance > 127
 
     # Scale all pixel-based parameters relative to the reference page.
     # scale = ((w_img * h_img) / (_REF_W * _REF_H)) ** 0.5
@@ -1069,6 +1082,7 @@ def find_stamp_frames(
         # space.  PIL rotates counter-clockwise for positive angles, so negate
         # the detected skew to correct it.
         # deskewed = rgb.rotate(-skew_angle, expand=False, resample=Image.Resampling.BICUBIC)
+        print(f"Deskewing by {skew_angle:.2f} degrees")
         deskewed = rgb.rotate(-skew_angle, expand=False, resample=Image.Resampling.NEAREST)
         gray_pil = deskewed.convert("L")
         if crown_settings.DEBUG_FOLDER:
