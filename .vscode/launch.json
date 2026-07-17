@@ -14,12 +14,17 @@
                 "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ/Пример2/"
             },
             // "args": ["/home/al/prj/ITSumma/NPZ/пример5/РД-400-18-АС-48/fig-1.png"]
-            // "args": ["/home/al/prj/ITSumma/NPZ/пример5/РД-400-18-АС-48/large-fig-2.png"]
-            // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p36.png"
+            // "args": [
+            // "--show-original=off", //"",
+            // "--show-indexed-lines=on", //"on",
+            // "--show-closed-loops=on",
+            // "/home/al/prj/ITSumma/NPZ/пример5/РД-400-18-АС-48/large-fig-2.png",
+            // ]
+            "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p36.png"
             // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p57.png"
             // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p54.png"
             // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p56.png"
-            "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p1.png"
+            // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p1.png"
             // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p2.png"
             // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p3.png"
             // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p4.png"
@@ -67,7 +72,7 @@
                 // "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ"
                 "OLLAMA_SURYA_MODEL": "surya-ocr-2-65535",
                 // "OLLAMA_SURYA_MODEL": "surya2-ocr-64k",
-                "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ/Пример2/"
+                "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ/пример3/"
             },
         },
         {

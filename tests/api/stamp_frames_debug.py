@@ -22,7 +22,7 @@ import argparse
 import sys
 import os
 
-os.environ["QT_QPA_FONTDIR"] = "/usr/share/fonts/truetype/dejavu/"
+# os.environ["QT_QPA_FONTDIR"] = "/usr/share/fonts/truetype/dejavu/"
 
 import cv2 as cv
 import numpy as np
@@ -69,6 +69,17 @@ def _pil_to_cv_rgb(image: Image.Image) -> np.ndarray:
     return cv.cvtColor(arr, cv.COLOR_RGB2BGR)
 
 
+def str_to_bool(value):
+    if isinstance(value, bool):
+        return value
+    if value.lower() in ('yes', 'true', 't', 'y', '1', 'on'):
+        return True
+    elif value.lower() in ('no', 'false', 'f', 'n', '0', 'off'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
 def main(argv):
     parser = argparse.ArgumentParser(
         description="Visual test driver for the production stamp-frame detector.",
@@ -82,20 +93,23 @@ def main(argv):
     )
     parser.add_argument(
         "--show-original",
-        action="store_true",
+        # action="store_true",
+        type=str_to_bool,
         default=True,
         help="Render the detected frames on top of the (deskewed) source image "
         "instead of a black canvas (default: enabled).",
     )
     parser.add_argument(
         "--show-indexed-lines",
-        action="store_true",
+        # action="store_true",
+        type=str_to_bool,
         default=False,
         help="Overlay the indexed Hough line segments used by the detector.",
     )
     parser.add_argument(
         "--show-closed-loops",
-        action="store_true",
+        # action="store_true",
+        type=str_to_bool,
         default=False,
         help="Overlay the bounding boxes of all closed loops found by the detector.",
     )
