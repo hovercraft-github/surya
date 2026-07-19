@@ -1184,6 +1184,12 @@ wheels = [
 ]
 
 [[package]]
+name = "imutils"
+version = "0.5.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3f/d3/ecb4d108f6c1041d24842a345ee0123cd7f366ba75cf122601e856d42ba2/imutils-0.5.4.tar.gz", hash = "sha256:03827a9fca8b5c540305c0844a62591cf35a0caec199cb0f2f0a4a0fb15d8f24", size = 17240, upload-time = "2021-01-15T10:53:17.816Z" }
+
+[[package]]
 name = "iniconfig"
 version = "2.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -4025,6 +4031,7 @@ dependencies = [
     { name = "filetype" },
     { name = "httpx" },
     { name = "huggingface-hub" },
+    { name = "imutils" },
     { name = "openai" },
     { name = "opencv-python" },
     { name = "pillow" },
@@ -4061,6 +4068,7 @@ requires-dist = [
     { name = "filetype", specifier = ">=1.2.0,<2" },
     { name = "httpx", specifier = ">=0.27.0,<0.28" },
     { name = "huggingface-hub", specifier = ">=0.26.0,<1" },
+    { name = "imutils", specifier = ">=0.5.4" },
     { name = "openai", specifier = ">=1.55.0,<2" },
     { name = "opencv-python", specifier = "==4.11.0.86" },
     { name = "pillow", specifier = ">=10.2.0,<11" },

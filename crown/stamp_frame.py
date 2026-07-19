@@ -52,6 +52,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from crown.settings import crown_settings
+from crown.text_detection.east_text_detection import detect_texts
 
 
 # Reference page dimensions for which the default parameters were tuned.
@@ -1388,8 +1389,8 @@ def split_frames(
 ) -> tuple[
     Image.Image | None,
     Image.Image,
-    Image.Image,
-    Image.Image,
+    Image.Image | None,
+    Image.Image | None,
     dict[str, StampFrame | None],
 ]:
     """Split a document page into four regions using the detected stamp frames.
@@ -1506,4 +1507,6 @@ def split_frames(
         if metadata_interior
         else None
     )
+    upper_right_text_boxes, upper_right = detect_texts(upper_right)
+    bottom_right_text_boxes, bottom_right = detect_texts(bottom_right)
     return metadata_interior, page_content, upper_right, bottom_right, frames_dict

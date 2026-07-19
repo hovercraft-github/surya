@@ -271,10 +271,10 @@ app.add_middleware(
 async def stamp_ocr(image: Image.Image, location: str = "stamp") -> dict[str, Any]:
     if location in ["upper_right_corner", "bottom_right_corner"]:
         mode = "corner"
-        layout_predictor = LayoutPredictor(inference_manager)
-        layouts = await asyncio.to_thread(layout_predictor, [image])
-        if not layouts or not layouts[0].bboxes:
-            return {"html": "", "blocks": []}
+        # layout_predictor = LayoutPredictor(inference_manager)
+        # layouts = await asyncio.to_thread(layout_predictor, [image])
+        # if not layouts or not layouts[0].bboxes:
+        #     return {"html": "", "blocks": []}
     else:
         mode = "stamp"
     table_rec_predictor = TableExtPredictor(inference_manager)

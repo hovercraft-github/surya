@@ -14,13 +14,13 @@
                 "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ/Пример2/"
             },
             // "args": ["/home/al/prj/ITSumma/NPZ/пример5/РД-400-18-АС-48/fig-1.png"]
-            "args": [
-            // "--show-original=off",
-            // "--show-indexed-lines=on"
-            // "--show-closed-loops=on",
-            // "--show-main-frames=on",
-            "/home/al/prj/ITSumma/NPZ/пример5/РД-400-18-АС-48/large-fig-2.png",
-            ]
+            // "args": [
+            // // "--show-original=off",
+            // // "--show-indexed-lines=on"
+            // // "--show-closed-loops=on",
+            // // "--show-main-frames=on",
+            // "/home/al/prj/ITSumma/NPZ/пример5/РД-400-18-АС-48/large-fig-2.png",
+            // ]
             // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p36.png"
             // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p57.png"
             // "args": "/home/al/prj/ITSumma/NPZ/Пример2/pages/p54.png"
@@ -29,7 +29,7 @@
             // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p2.png"
             // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p3.png"
             // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p4.png"
-            // "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p5.png"
+            "args": "/home/al/prj/ITSumma/NPZ/пример3/pages/p5.png"
         },
         {
             "name": "hough",
