@@ -112,6 +112,30 @@ def _generate_one(
 
     try:
         if "response_format" in kwargs:
+            # Remove .json_schema.schema.maxItems (if exists) to avoid vllm validation errors for large outputs
+            if (
+                isinstance(kwargs["response_format"], dict)
+                and "json_schema" in kwargs["response_format"]
+                and "schema" in kwargs["response_format"]["json_schema"]
+                and "maxItems" in kwargs["response_format"]["json_schema"]["schema"]
+            ):
+                del kwargs["response_format"]["json_schema"]["schema"]["maxItems"]
+            # Replace .json_schema.schema.items.properties.bbox.pattern (if exists) with "^[0-9]{1,4} [0-9]{1,4} [0-9]{1,4} [0-9]{1,4}$"
+            if (
+                isinstance(kwargs["response_format"], dict)
+                and "json_schema" in kwargs["response_format"]
+                and "schema" in kwargs["response_format"]["json_schema"]
+                and "items" in kwargs["response_format"]["json_schema"]["schema"]
+                and "properties" in kwargs["response_format"]["json_schema"]["schema"][
+                    "items"
+                ]
+                and "bbox" in kwargs["response_format"]["json_schema"]["schema"][
+                    "items"
+                ]["properties"]
+            ):
+                kwargs["response_format"]["json_schema"]["schema"]["items"][
+                    "properties"
+                ]["bbox"]["pattern"] = "^[0-9]{1,4} [0-9]{1,4} [0-9]{1,4} [0-9]{1,4}$"
             response_format = json.dumps(kwargs["response_format"], indent=2, ensure_ascii=False)
             logger.info(f"Requesting structured output with schema: {response_format}")
         completion = client.chat.completions.create(**kwargs)

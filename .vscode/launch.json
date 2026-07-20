@@ -73,7 +73,8 @@
                 // "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ"
                 "OLLAMA_SURYA_MODEL": "surya-ocr-2-65535",
                 // "OLLAMA_SURYA_MODEL": "surya2-ocr-64k",
-                "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ/пример3/"
+                // "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ/пример3/"
+                "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ/пример5"
             },
         },
         {
