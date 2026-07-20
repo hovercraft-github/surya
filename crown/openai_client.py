@@ -12,6 +12,7 @@ import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
+import json
 
 from PIL import Image
 
@@ -110,6 +111,9 @@ def _generate_one(
         kwargs.setdefault("extra_body", {})["guided_regex"] = item.guided_regex
 
     try:
+        if "response_format" in kwargs:
+            response_format = json.dumps(kwargs["response_format"], indent=2, ensure_ascii=False)
+            logger.info(f"Requesting structured output with schema: {response_format}")
         completion = client.chat.completions.create(**kwargs)
         raw = completion.choices[0].message.content or ""
         token_count = completion.usage.completion_tokens if completion.usage else 0
