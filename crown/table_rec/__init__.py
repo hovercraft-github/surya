@@ -165,7 +165,7 @@ def ollama_surya(image: Image.Image, prompt: str | None = None, num_predict: int
                     # "temperature": 0.0,
                     # "stop": ["\n", "\n\n", " \n \n \n", "---"],
                     # "stop": ["\n\n", " \n \n \n", "---", "\n```\n```", "``````"],
-                    # "num_predict": 2048,
+                    "num_predict": 2048,
                     # "repeat_penalty": 1.4
                     },
     }

@@ -27,7 +27,7 @@ import asyncio
 from crown.stamp_frame import split_frames, StampFrame
 from crown.table_rec import TableExtPredictor, reconstruct_html_table, glm_ocr
 from crown.utils import bbox_expand, crop_by_percent, crop_by_side_percent, get_page_image, trim_empty_background
-from crown.utils import poligon_expand
+from crown.utils import poligon_expand, merge_html_blocks
 from crown.settings import crown_settings
 from surya.layout.schema import LayoutBox, LayoutResult
 from surya.recognition.schema import PageOCRResult
@@ -404,14 +404,7 @@ async def ocr_full_page(request: Request, file: UploadFile = File(...),
                             )
 
                 # Assemble full-page HTML by combining all blocks in reading order
-                html_parts = []
-                for block in blocks_data:
-                    # Each block already has HTML with proper structure from the model
-                    html_parts.append(
-                        f'<div class="block" data-label="{block["label"]}">{block["html"]}</div>'
-                    )
-
-                full_html = '<div id="ocr-page">' + "\n".join(html_parts) + "</div>"
+                full_html = merge_html_blocks(blocks_data)
                 end_time = perf_counter()
                 crown_logger.info(
                     f"OCR completed for {file.filename}, extracted {len(blocks_data)} blocks in {end_time - start_time:.2f} seconds."
@@ -688,14 +681,7 @@ async def ocr_blocks(request: Request, file: UploadFile = File(...),
                             }
                         )
 
-                html_parts = []
-                for block in blocks_data:
-                    # Each block already has HTML with proper structure from the model
-                    html_parts.append(
-                        f'<div class="block" data-label="{block["label"]}">{block["html"]}</div>'
-                    )
-
-                full_html = '<div id="ocr-page">' + "\n".join(html_parts) + "</div>"
+                full_html = merge_html_blocks(blocks_data)
                 end_time = perf_counter()
                 crown_logger.info(
                     f"OCR completed for {file.filename}, extracted {len(blocks_data)} blocks in {end_time - start_time:.2f} seconds."
