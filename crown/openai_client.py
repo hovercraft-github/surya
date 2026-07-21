@@ -68,6 +68,29 @@ def _mean_token_prob(logprobs_content) -> Optional[float]:
     return sum(probs) / len(probs)
 
 
+# llama-cpp's JSON-schema validator rejects a couple of constructs that the
+# OpenAI/vllm backends accept. Normalize the schema in place before sending.
+_BBOX_PATTERN = "^[0-9]{1,4} [0-9]{1,4} [0-9]{1,4} [0-9]{1,4}$"
+
+
+def _patch_schema_for_llamacpp(response_format: object) -> None:
+    """Mutate ``response_format`` to satisfy llama-cpp's stricter validator."""
+    if not isinstance(response_format, dict):
+        return
+    schema = response_format.get("json_schema", {}).get("schema")
+    if not isinstance(schema, dict):
+        return
+    # llama-cpp rejects ``maxItems`` on array fields.
+    schema.pop("maxItems", None)
+    # It also rejects PCRE shorthand \\d inside the bbox pattern emitted upstream; replace it
+    # with the pattern llama-cpp accepts.
+    items = schema.get("items")
+    if isinstance(items, dict):
+        bbox = items.get("properties", {}).get("bbox")
+        if isinstance(bbox, dict) and "pattern" in bbox:
+            bbox["pattern"] = _BBOX_PATTERN
+
+
 def _generate_one(
     item: BatchInputItem,
     client,
@@ -112,30 +135,7 @@ def _generate_one(
 
     try:
         if "response_format" in kwargs:
-            # Remove .json_schema.schema.maxItems (if exists) to avoid vllm validation errors for large outputs
-            if (
-                isinstance(kwargs["response_format"], dict)
-                and "json_schema" in kwargs["response_format"]
-                and "schema" in kwargs["response_format"]["json_schema"]
-                and "maxItems" in kwargs["response_format"]["json_schema"]["schema"]
-            ):
-                del kwargs["response_format"]["json_schema"]["schema"]["maxItems"]
-            # Replace .json_schema.schema.items.properties.bbox.pattern (if exists) with "^[0-9]{1,4} [0-9]{1,4} [0-9]{1,4} [0-9]{1,4}$"
-            if (
-                isinstance(kwargs["response_format"], dict)
-                and "json_schema" in kwargs["response_format"]
-                and "schema" in kwargs["response_format"]["json_schema"]
-                and "items" in kwargs["response_format"]["json_schema"]["schema"]
-                and "properties" in kwargs["response_format"]["json_schema"]["schema"][
-                    "items"
-                ]
-                and "bbox" in kwargs["response_format"]["json_schema"]["schema"][
-                    "items"
-                ]["properties"]
-            ):
-                kwargs["response_format"]["json_schema"]["schema"]["items"][
-                    "properties"
-                ]["bbox"]["pattern"] = "^[0-9]{1,4} [0-9]{1,4} [0-9]{1,4} [0-9]{1,4}$"
+            _patch_schema_for_llamacpp(kwargs["response_format"])
             response_format = json.dumps(kwargs["response_format"], indent=2, ensure_ascii=False)
             logger.info(f"Requesting structured output with schema: {response_format}")
         completion = client.chat.completions.create(**kwargs)
