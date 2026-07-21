@@ -56,7 +56,6 @@ TABLE_REC_JSON_SCHEMA_EXT = {
     },
 }
 
-GLMOCR_MODEL = "glm-ocr:latest"
 GLMOCR_PROMPT = (
     "Extract all text from this image. "
     "Format any tables as HTML tables (<table><thead>...). "
@@ -82,12 +81,14 @@ def ollama_glm(image: Image.Image, prompt: str | None = None, num_predict: int |
     if not OLLAMA_URL:
         OLLAMA_URL = crown_settings.OLLAMA_URL_LAYOUT
     if not OLLAMA_URL:
-        raise ValueError("OLLAMA_URL or OLLAMA_URL_LAYOUT must be set in crown_settings.")
+        raise ValueError("OLLAMA_URL or OLLAMA_URL_LAYOUT must be set in your environment.")
+    if not crown_settings.OLLAMA_GLM_MODEL:
+        raise ValueError("OLLAMA_GLM_MODEL must be set in your environment.")
     if not prompt:
         prompt = GLMOCR_PROMPT
 
     payload = {
-        "model": GLMOCR_MODEL,
+        "model": crown_settings.OLLAMA_GLM_MODEL,
         "messages": [
             {
                 "role": "user",
@@ -144,7 +145,9 @@ def ollama_surya(image: Image.Image, prompt: str | None = None, num_predict: int
     if not OLLAMA_URL:
         OLLAMA_URL = crown_settings.OLLAMA_URL_LAYOUT
     if not OLLAMA_URL:
-        raise ValueError("OLLAMA_URL or OLLAMA_URL_LAYOUT must be set in crown_settings.")
+        raise ValueError("OLLAMA_URL or OLLAMA_URL_LAYOUT must be set in your environment.")
+    if not crown_settings.OLLAMA_SURYA_MODEL:
+        raise ValueError("OLLAMA_SURYA_MODEL name must be set in your environment.")
     if not prompt:
         prompt = SURYA_OLLAMA_TBL_HTML_PROMPT
 

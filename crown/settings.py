@@ -71,6 +71,7 @@ class CrownSettings(BaseSettings):
     OLLAMA_URL_LAYOUT: Optional[str] = None
     DEBUG_FOLDER: Optional[str] = None
     OLLAMA_SURYA_MODEL: Optional[str] = None
+    OLLAMA_GLM_MODEL: Optional[str] = None
 
     class Config:
         env_file = find_dotenv("local.env")
