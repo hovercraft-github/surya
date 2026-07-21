@@ -22,10 +22,11 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from openai import OpenAI
 
-from surya.inference import SuryaInferenceManager
+from surya.inference import SuryaInferenceManager, _autodetect_backend
 from surya.inference.backends.llamacpp import LlamaCppBackend, _resolve_llama_server_binary, _download_gguf_files, _health_url, _openai_url
 from surya.inference.backends.vllm import VllmBackend, _gpu_settings, _resolve_docker_binary
 from surya.inference.schema import BatchInputItem, BatchOutputItem
@@ -45,6 +46,16 @@ from crown.settings import crown_settings
 
 logger = get_logger()
 
+
+def get_hostname(url):
+    if not url.startswith(('http://', 'https://', '//')):
+        url = '//' + url
+    return urlsplit(url).hostname
+
+def get_port(url):
+    if not url.startswith(('http://', 'https://', '//')):
+        url = '//' + url
+    return urlsplit(url).port
 
 def _llamacpp_max_workers() -> int:
     """Client-side concurrency for the llama.cpp backend.
@@ -371,14 +382,86 @@ class CrownLlamaCppBackend(LlamaCppBackend):
         )
 
 
+class CrownOllamaBackend(Backend):
+    """Crown-owned backend that talks to an external Ollama server.
+
+    Ollama exposes an OpenAI-compatible ``/v1/chat/completions`` endpoint, so
+    this backend is a thin wrapper around :func:`crown.openai_client.chat_completions_batch`.
+    Unlike vllm/llamacpp it never spawns a server: the Ollama instance is
+    assumed to be already running at the URL configured by
+    ``OLLAMA_URL_LAYOUT``. The default model is taken from
+    ``OLLAMA_SURYA_MODEL``. A dummy API key is sent because Ollama ignores it
+    but the OpenAI client requires one to be set.
+    """
+
+    name = "ollama"
+
+    def __init__(self) -> None:
+        self.handle: Optional[ServerHandle] = None
+        self._client: Optional[OpenAI] = None
+
+    def start(self) -> ServerHandle:
+        if self.handle is not None:
+            return self.handle
+        base_url = crown_settings.OLLAMA_URL_LAYOUT
+        if not base_url:
+            raise ValueError(
+                "OLLAMA_URL_LAYOUT is not set; cannot start the ollama backend."
+            )
+        url_path = urlsplit(base_url).path
+        if not url_path.startswith("/v1"):
+            base_url = base_url.rstrip("/") + "/v1"
+        model_name = crown_settings.OLLAMA_SURYA_MODEL or ""
+        if not model_name:
+            raise ValueError(
+                "OLLAMA_SURYA_MODEL is not set; cannot start the ollama backend."
+            )
+        self.handle = ServerHandle(
+            base_url=base_url,
+            model_name=model_name,
+            spawned_by_us=False,
+        )
+        self._client = OpenAI(api_key="ollama", base_url=self.handle.base_url)
+        return self.handle
+
+    def stop(self) -> None:
+        # We never spawn the Ollama server, so there is nothing to stop.
+        self.handle = None
+        self._client = None
+
+    def generate(self, batch: List[BatchInputItem]) -> List[BatchOutputItem]:
+        if self.handle is None or self._client is None:
+            self.start()
+        return chat_completions_batch(
+            batch,
+            client=self._client,
+            model_name=self.handle.model_name,
+            timeout=settings.SURYA_INFERENCE_TIMEOUT_SECONDS,
+            max_workers=_ollama_max_workers(),
+            request_logprobs_default=settings.SURYA_INFERENCE_LOGPROBS,
+        )
+
+
+def _ollama_max_workers() -> int:
+    """Client-side concurrency for the ollama backend.
+
+    Defaults to the same tuning surface as the other backends
+    (``SURYA_INFERENCE_MAX_WORKERS``), falling back to surya's
+    ``SURYA_INFERENCE_PARALLEL`` when unset.
+    """
+    return crown_settings.SURYA_INFERENCE_MAX_WORKERS or settings.SURYA_INFERENCE_PARALLEL
+
+
 def _build_backend(method: str) -> Backend:
     method = method.lower()
     if method == "vllm":
         return CrownVllmBackend()
     if method == "llamacpp":
         return CrownLlamaCppBackend()
+    if method == "ollama":
+        return CrownOllamaBackend()
     raise ValueError(
-        f"Unknown inference backend {method!r}. Supported: 'vllm', 'llamacpp'."
+        f"Unknown inference backend {method!r}. Supported: 'vllm', 'llamacpp', 'ollama'."
     )
 
 
@@ -445,7 +528,8 @@ class CrownSuryaInferenceManager(SuryaInferenceManager):
         # Enforce single-instance invariant. Acquiring the lock here also
         # serializes concurrent construction attempts.
         with CrownSuryaInferenceManager._instance_lock:
-            super().__init__(method=method, lazy=True)
+            super().__init__(method="llamacpp", lazy=True)
+            self.method = method or _autodetect_backend()
             if CrownSuryaInferenceManager._instance is None:
                 CrownSuryaInferenceManager._instance = self
             # This trick is against fastapi and other forks: TODO: verify on Windows and MacOS. If this fails, we may need to use a more robust singleton pattern.
@@ -476,10 +560,14 @@ class CrownSuryaInferenceManager(SuryaInferenceManager):
     # -- lifecycle --------------------------------------------------------
 
     def start(self) -> None:
-        if not hasattr(self, "backend"):
-            self.backend = _build_backend(self.method)
-        super().start()
-        self._ensure_batcher_thread()
+        with self._batcher_lock:
+            is_running = self._batcher_thread is not None and self._batcher_thread.is_alive()
+            if is_running:
+                return
+            if not hasattr(self, "backend"):
+                self.backend = _build_backend(self.method)
+            super().start()
+            self._ensure_batcher_thread()
 
     def stop(self) -> None:
         # Signal the background batcher thread to exit, then join it.
@@ -643,9 +731,31 @@ class CrownSuryaInferenceManager(SuryaInferenceManager):
                 self._booked_requests -= 1
 
 
+def get_backend_host(manager: "SuryaInferenceManager") -> str:
+    """Return the hostname of the backend server, if known."""
+    if manager.backend is None:
+        return "localhost"
+    if isinstance(manager.backend, CrownOllamaBackend):
+        return get_hostname(manager.backend.handle.base_url) if manager.backend.handle else "localhost"
+    if isinstance(manager.backend, (CrownVllmBackend, CrownLlamaCppBackend)):
+        return get_hostname(manager.backend.handle.base_url) if manager.backend.handle else "localhost"
+    return "localhost"
+
+
+def get_backend_port(manager: "SuryaInferenceManager") -> Optional[int]:
+    """Return the port of the backend server, if known."""
+    if manager.backend is None:
+        return None
+    if isinstance(manager.backend, CrownOllamaBackend):
+        return get_port(manager.backend.handle.base_url) if manager.backend.handle else None
+    if isinstance(manager.backend, (CrownVllmBackend, CrownLlamaCppBackend)):
+        return get_port(manager.backend.handle.base_url) if manager.backend.handle else None
+    return None
+
 __all__ = [
     "BatchBusyError",
     "CrownLlamaCppBackend",
+    "CrownOllamaBackend",
     "CrownSuryaInferenceManager",
     "CrownVllmBackend",
 ]

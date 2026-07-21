@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import multiprocessing
-from typing import Any
+from typing import Any, Optional
 # This MUST be called before any other app setups or process creations
 try:
     multiprocessing.set_start_method('spawn', force=True)
@@ -33,7 +33,7 @@ from surya.layout.schema import LayoutBox, LayoutResult
 from surya.recognition.schema import PageOCRResult
 from surya.settings import settings
 # from surya.inference import SuryaInferenceManager
-from crown.inference import CrownSuryaInferenceManager, BatchBusyError
+from crown.inference import CrownSuryaInferenceManager, BatchBusyError, get_backend_host, get_backend_port
 from surya.recognition import RecognitionPredictor
 
 # from surya.detection import DetectionPredictor
@@ -103,6 +103,9 @@ inference_manager = CrownSuryaInferenceManager()
 
 
 def update_request_count(delta: int = 1) -> None:
+    if inference_manager.method == "ollama":
+        # Ollama backend doesn't use the sentinel file.
+        return
     lock = FileLock(str(_lock_path(backend_type)))
     try:
         with lock.acquire(timeout=1):
@@ -122,6 +125,9 @@ def update_request_count(delta: int = 1) -> None:
         raise
 
 def get_request_count() -> tuple[int, float | None, int | None]:
+    if inference_manager.method == "ollama":
+        # Ollama backend doesn't use the sentinel file, so we can't get the request count from it.
+        return 0, perf_counter(), get_backend_port(inference_manager)
     lock = FileLock(str(_lock_path(backend_type)))
     try:
         with lock.acquire(timeout=1):
@@ -140,6 +146,9 @@ def get_request_count() -> tuple[int, float | None, int | None]:
 
 
 def cleanup():
+    if inference_manager.method == "ollama":
+        # Ollama backend doesn't use the sentinel file.
+        return
     crown_logger.info("Cleaning up resources...")
     lock = FileLock(str(_lock_path(backend_type)))
     try:
@@ -350,14 +359,15 @@ async def ocr_full_page(request: Request, file: UploadFile = File(...),
                 detail="Inconsistent crop values",
             )
         recognizer = RecognitionPredictor(inference_manager)
+        backend_host = get_backend_host(inference_manager)
         _, last_updated, port = get_request_count()
         if (
             last_updated is None
             or port is None
-            or not probe_health(f"http://{settings.SURYA_INFERENCE_HOST}:{port}")
+            or not probe_health(f"http://{backend_host}:{port}")
         ):
             inference_manager.stop()
-            inference_manager.start()
+        inference_manager.start()
         async with inference_manager.booking():
             update_request_count()
             try:
@@ -594,14 +604,15 @@ async def ocr_blocks(request: Request, file: UploadFile = File(...),
                 status_code=400,
                 detail="Inconsistent crop values",
             )
+        backend_host = get_backend_host(inference_manager)
         _, last_updated, port = get_request_count()
         if (
             last_updated is None
             or port is None
-            or not probe_health(f"http://{settings.SURYA_INFERENCE_HOST}:{port}")
+            or not probe_health(f"http://{backend_host}:{port}")
         ):
             inference_manager.stop()
-            inference_manager.start()
+        inference_manager.start()
         async with inference_manager.booking():
             update_request_count()
             try:
