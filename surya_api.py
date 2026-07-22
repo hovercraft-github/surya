@@ -461,13 +461,16 @@ def table_recognition(
     layout: LayoutResult,
     margin: int,
     mode: str
-) -> tuple[list[TableResult], list[tuple[int, ...]]]:
+) -> tuple[list[TableResult], list[tuple[int, ...]], list[int]]:
     tables = [b for b in layout.bboxes if b.label in ("Table", "Table-Of-Contents")]
     if not tables:
-        return [], []
+        return [], [], []
+    table_positions = [b.position for b in tables]
     pixels = img.getcolors(maxcolors=img.size[0] * img.size[1])
     bg_color = max(pixels, key=lambda x: x[0])[1] if pixels else (255, 255, 255)
-    table_bboxes = [bbox_expand(tuple(int(c) for c in b.bbox), margin) for b in tables]
+    w = img.width
+    h = img.height
+    table_bboxes = [bbox_expand(tuple(int(c) for c in b.bbox), margin, w, h) for b in tables]
     table_imgs = [ImageOps.expand(img.crop(b), border=margin, fill=bg_color) for b in table_bboxes]
     for i, table_img in enumerate(table_imgs):
         if table_img.mode != "RGB":
@@ -488,7 +491,7 @@ def table_recognition(
                 pred.rows = pred2.rows
                 pred.raw = pred2.raw
                 # pred.html = reconstruct_html_table(pred)
-    return table_preds, table_bboxes
+    return table_preds, table_bboxes, table_positions
 
 
 async def text_recognition_async(
@@ -532,7 +535,7 @@ async def table_recognition_async(
     layout: LayoutResult,
     margin: int,
     mode: str,
-) -> tuple[list[TableResult], list[tuple[int, ...]]]:
+    ) -> tuple[list[TableResult], list[tuple[int, ...]], list[int]]:
     """Async wrapper for :func:`table_recognition` that offloads the blocking
     inference work to a worker thread via :func:`asyncio.to_thread` so the
     event loop stays responsive while the table recognizer runs."""
@@ -641,19 +644,24 @@ async def ocr_blocks(request: Request, file: UploadFile = File(...),
                     bottom_right_ocr_result = await stamp_ocr(bottom_right, "bottom_right_corner")
                     page_metadata["bottom_right_corner"] = bottom_right_ocr_result
                 image = page_content if page_content else image  # Use the main content area for OCR
+                if crown_settings.DEBUG_FOLDER:
+                    os.makedirs(crown_settings.DEBUG_FOLDER, exist_ok=True)
+                    image.save(f"{crown_settings.DEBUG_FOLDER}/page_content.png")
                 layout_predictor = LayoutPredictor(inference_manager)
                 layouts = await asyncio.to_thread(layout_predictor, [image])
                 if not layouts or not layouts[0].bboxes:
                     return {"html": "", "blocks": []}
                 width, height = image.size
-                margin = int(max(width, height) / 200)  # Dynamic margin based on image size (e.g., 2px for 1000px image)
+                if dpi is None:
+                    dpi = int(image.info.get("dpi", (300, 300))[0])
+                margin = int(max(width, height) // dpi)  # Dynamic margin based on image size (e.g., 2px for 1000px image)
                 layout = copy.deepcopy(layouts[0])
                 for block in layouts[0].bboxes:
                     poligon_expand(block.polygon, margin=margin)
                 # Run text and table recognition sequentially (texts first, then tables)
                 # via asyncio.to_thread so each blocking inference call yields the event loop.
                 texts, text_bboxes = await text_recognition_async(image, layouts)
-                tables, table_bboxes = await table_recognition_async(image, layout, margin, mode="td")
+                tables, table_bboxes, table_positions = await table_recognition_async(image, layout, margin // 2, mode="td")
                 blocks_data = []
                 for pred in texts:
                     for block in pred.blocks:
@@ -667,7 +675,7 @@ async def ocr_blocks(request: Request, file: UploadFile = File(...),
                                     "reading_order": block.reading_order,
                                 }
                             )
-                for table, bbox in zip(tables, table_bboxes):
+                for table, bbox, position in zip(tables, table_bboxes, table_positions):
                     if table.html:  # Skip empty/skipped tables
                         blocks_data.append(
                             {
@@ -678,8 +686,10 @@ async def ocr_blocks(request: Request, file: UploadFile = File(...),
                                 "cols": table.cols,
                                 "cells": table.cells,
                                 "bbox": bbox,
+                                "reading_order": position,
                             }
                         )
+                blocks_data = sorted(blocks_data, key=lambda x: x.get("reading_order", 0))
 
                 full_html = merge_html_blocks(blocks_data)
                 end_time = perf_counter()

@@ -59,14 +59,19 @@ def poligon_expand(polygon: list[list[float]], margin: float):
     polygon[3][1] += margin  # y_max
 
 
-def bbox_expand(bbox: tuple[int, ...], margin: int) -> tuple[int, int, int, int]:
+def bbox_expand(bbox: tuple[int, ...], margin: int, image_width: int, image_height: int) -> tuple[int, int, int, int]:
     """
     Expands a bounding box by a certain margin.
                 bbox = [x_min, y_min, x_max, y_max]
     """
     if len(bbox) != 4:
         return bbox
-    return (bbox[0] - margin, bbox[1], bbox[2] + margin + margin, bbox[3] + margin)
+    return (
+        max(0, bbox[0] - margin),
+        max(0, bbox[1] - margin),
+        min(image_width, bbox[2] + margin),
+        min(image_height, bbox[3] + margin),
+    )
 
 
 def image_white_cnt_points(image: Image.Image, white_threshold: int = 200) -> int:
@@ -253,6 +258,14 @@ def trim_empty_background(
 
     if crop_left >= crop_right or crop_top >= crop_bottom:
         return image
+    if crop_left >= w_step:
+        crop_left -= w_step
+    if crop_top >= h_step:
+        crop_top -= h_step
+    if crop_right < w:
+        crop_right += w_step
+    if crop_bottom < h:
+        crop_bottom += h_step
     if crop_left > 0 or crop_top > 0 or crop_right < w or crop_bottom < h:
         image = image.crop((crop_left, crop_top, crop_right, crop_bottom))
     return image
@@ -467,5 +480,7 @@ def merge_html_blocks(
         members.sort(key=lambda it: (it[1], it[0]))
         for _cx, _cy, _bbox, _idx, block in members:
             html = block.get("html") or ""
-            parts.append(fix_html_chunk(html))
+            html = fix_html_chunk(html)
+            html = f"""<div id="block-{_idx}" data-bbox="{_bbox[0]}, {_bbox[1]}, {_bbox[2]}, {_bbox[3]}">{html}</div>"""
+            parts.append(html)
     return "\n".join(parts)

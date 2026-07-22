@@ -1443,7 +1443,12 @@ def split_frames(
     metadata_frame: StampFrame | None = None
     if frames:
         page_content_frame = frames[0]
-    if len(frames) >= 2:
+        total_area = w * h
+        content_area = page_content_frame.area
+        area_ratio = content_area / total_area if total_area > 0 else 0
+        if area_ratio < 0.7:
+            page_content_frame = None
+    if len(frames) >= 2 and page_content_frame:
         metadata_frame = frames[1]
 
     # 1. Interior of the metadata record frame.
@@ -1456,9 +1461,12 @@ def split_frames(
 
     # 2. Page content interior with the metadata frame erased.
     if page_content_frame is not None:
-        x1, y1, x2, y2 = page_content_frame.bbox
+        from crown.utils import bbox_expand
+        dpi = int(image.info.get("dpi", (300, 300))[0])
+        margin = max(w, h) // dpi
+        x1, y1, x2, y2 = bbox_expand(page_content_frame.bbox, margin=margin, image_width=w, image_height=h)
         page_content = work.crop(
-            (max(0, x1 + 4), max(0, y1 + 4), min(w, x2 - 4), min(h, y2 - 4))
+            (max(0, x1), max(0, y1), min(w, x2), min(h, y2))
         )
         if metadata_frame is not None:
             mx1, my1, mx2, my2 = metadata_frame.bbox
