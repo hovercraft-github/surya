@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 
 
 import pypdfium2
-from PIL import Image
+from PIL import Image, ImageDraw
 from fastapi import UploadFile
 from concurrent.futures import ProcessPoolExecutor
 
@@ -125,7 +125,20 @@ def crop_by_side_percent(
     crop_bottom = h - int(h * bottom / 100)
     if crop_left >= crop_right or crop_top >= crop_bottom:
         return image
-    return image.crop((crop_left, crop_top, crop_right, crop_bottom))
+    image = image.crop((crop_left, crop_top, crop_right, crop_bottom))
+    if left < 50.0:
+        return image
+    w, h = image.size
+    dpi = int(image.info.get("dpi", (300, 300))[0])
+    offset = int(50 / 300 * dpi)
+    if w < offset * 2 or h < offset * 2:
+        return image
+    draw = ImageDraw.Draw(image)
+    # coordinates = (offset, offset, w-offset, h-offset)
+    # draw.rectangle(coordinates, outline="blue", width=5)
+    coordinates = (offset, 0, offset, h)
+    draw.line(coordinates, fill="blue", width=5)
+    return image
 
 def entropy(values):
     values = np.asarray(values)

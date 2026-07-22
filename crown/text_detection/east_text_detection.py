@@ -47,6 +47,7 @@ def detect_texts(
     min_confidence=0.5,
     width=320,
     height=320,
+    tolerance=10
 ) -> tuple[list[tuple[int, int, int, int]], Image.Image | None]:
     """
     Detects text regions in an image using the EAST text detector.
@@ -102,8 +103,7 @@ def detect_texts(
         results.append((startX, startY, endX, endY))
 
     ret_image = None
-    if results:
-        tolerance = 10
+    if results:        
         ret_image = pil_image.crop((max(min(x[0] for x in results) - tolerance, 0),
                                                      max(min(x[1] for x in results) - tolerance, 0),
                                                      min(max(x[2] for x in results) + tolerance, pil_image.width),

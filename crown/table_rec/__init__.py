@@ -7,8 +7,10 @@ from PIL import Image
 from io import BytesIO
 import requests
 import json
+import numpy as np
 
 from torch.cuda import temperature
+import easyocr
 
 
 from surya.table_rec import TableRecPredictor, _polygon_from_bbox, _intersect_bbox, logger
@@ -121,11 +123,15 @@ SURYA_OLLAMA_TBL_HTML_PROMPT = (
 
 SURYA_OLLAMA_STAMP_HTML_PROMPT = (
     "OCR this table to plain text"
+    # "'OCR this block image to HTML"
+    # "OCR this table to HTML"
 )
 
 SURYA_OLLAMA_STAMP_CORNER_PROMPT = (
     # "OCR this table block image to plain text"
-    "OCR this block to HTML"
+    # "OCR this block to HTML"
+    "OCR this block image to HTML"
+    # "OCR this image to HTML"
 )
 
 SURYA_OLLAMA_TBL_JSON_PROMPT = ( 
@@ -165,7 +171,7 @@ def ollama_surya(image: Image.Image, prompt: str | None = None, num_predict: int
                     # "temperature": 0.0,
                     # "stop": ["\n", "\n\n", " \n \n \n", "---"],
                     # "stop": ["\n\n", " \n \n \n", "---", "\n```\n```", "``````"],
-                    # "num_predict": 2048,
+                    # "num_predict": 4096,
                     # "repeat_penalty": 1.4
                     },
     }
@@ -238,7 +244,35 @@ class TableExtPredictor(TableRecPredictor):
         elif mode == "stamp":
             prompt = SURYA_OLLAMA_STAMP_HTML_PROMPT
         elif mode == "corner":
-            prompt = SURYA_OLLAMA_STAMP_CORNER_PROMPT
+            # prompt = SURYA_OLLAMA_STAMP_CORNER_PROMPT
+            reader = easyocr.Reader(['en', "ru"])
+            img = images[0]
+            img_array = np.asarray(img)
+            predictions = reader.readtext(img_array, detail=0, paragraph=True)
+            texts: list[str] = []
+            w, h = img_array.shape[1], img_array.shape[0]
+            page_bbox = [0, 0, float(w), float(h)]
+            for text in predictions:
+                if text:
+                    texts.append(f"<p>{text}</p>")
+            if texts:
+                html = "\n".join(texts)
+            else:
+                html = ""
+            results = []
+            results.append(
+                TableResult(
+                    rows=[],
+                    cols=[],
+                    cells=[],
+                    image_bbox=page_bbox,
+                    raw=None,
+                    html=html,
+                    mode="full",
+                    error=False,
+                )
+            )
+            return results
         if prompt:
             prompt_type = ""
         else:

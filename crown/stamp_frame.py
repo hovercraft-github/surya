@@ -1487,16 +1487,22 @@ def split_frames(
 
     def _corner(corner_bbox: tuple[int, int, int, int]) -> Image.Image:
         crop = work.crop(corner_bbox)
+        tol = corner_tolerance // 2
         if page_content_frame is not None:
             overlap = _intersect(page_content_frame.bbox, corner_bbox)
             if overlap is not None:
                 local = (
                     overlap[0] - corner_bbox[0],
-                    overlap[1] - corner_bbox[1] - corner_tolerance,
-                    overlap[2] - corner_bbox[0] + corner_tolerance,
-                    overlap[3] - corner_bbox[1] + corner_tolerance,
+                    overlap[1] - corner_bbox[1] - tol,
+                    overlap[2] - corner_bbox[0] + tol,
+                    overlap[3] - corner_bbox[1] + tol,
                 )
                 crop = _erase_region(crop, local, bg)
+        bbox = crop.getbbox()
+        if bbox is not None:
+            bbox = (max(0, bbox[0] + tol), max(0, bbox[1] + tol),
+                    min(crop.width, bbox[2] - tol), min(crop.height, bbox[3] - tol))
+            crop = crop.crop(bbox)  # Remove any empty border.
         crop = ImageOps.expand(crop, border=corner_tolerance * 5, fill=bg)
         return crop
 
@@ -1515,6 +1521,10 @@ def split_frames(
         if metadata_interior
         else None
     )
-    upper_right_text_boxes, upper_right = detect_texts(upper_right)
-    bottom_right_text_boxes, bottom_right = detect_texts(bottom_right)
+    if crown_settings.DEBUG_FOLDER:
+        os.makedirs(crown_settings.DEBUG_FOLDER, exist_ok=True)
+        upper_right.save(f"{crown_settings.DEBUG_FOLDER}/upper_right.png")
+        bottom_right.save(f"{crown_settings.DEBUG_FOLDER}/bottom_right.png")
+    upper_right_text_boxes, upper_right = detect_texts(upper_right, tolerance=corner_tolerance)
+    bottom_right_text_boxes, bottom_right = detect_texts(bottom_right, tolerance=corner_tolerance)
     return metadata_interior, page_content, upper_right, bottom_right, frames_dict

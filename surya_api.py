@@ -259,6 +259,11 @@ def load_and_preprocess_image(
         )
     elif crop > 0.0:
         image = crop_by_percent(image, crop)
+    w = image.width
+    h = image.height
+    if w > crown_settings.LARGE_IMAGES_HOR_THRESHOLD and crown_settings.TRIM_LARGE_IMAGES_LEFT_SIDE:
+        percent = (1 - h/w) * 100
+        image = crop_by_side_percent(image, left=percent, right=0.0, top=0.0, bottom=0.0)
     if crown_settings.DEBUG_FOLDER:
         os.makedirs(crown_settings.DEBUG_FOLDER, exist_ok=True)
         image.save(f"{crown_settings.DEBUG_FOLDER}/debug_preprocessed.png")
@@ -718,6 +723,137 @@ async def ocr_blocks(request: Request, file: UploadFile = File(...),
         crown_logger.error(f"OCR failed for {file.filename}: {msg}")
         raise HTTPException(
             status_code=500, detail=msg or "An error occurred during OCR processing."
+        )
+
+
+@app.post("/ocr/metadata/")
+async def ocr_metadata(request: Request, file: UploadFile = File(...),
+    dpi: int | None = Query(
+        default=300,
+        ge=72,
+        le=600,
+        description="Optional: DPI for rendering PDF pages to images. Higher DPI can improve OCR accuracy but increases processing time and memory usage. 300 (the default) is a common choice for good quality OCR."
+        ),
+    trim: float = Query(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Optional entropy threshold to detect and trim empty/solid fill background from each side of the image before OCR. Can help with empty borders that can provoke hallucinations. 0 means no trimming, 0.2 .. 0.5 recommended value, default is 0.5."
+        ),
+    crop: float = Query(
+        default=0.0,
+        ge=0.0,
+        le=50.0,
+        description="Optional percent to crop from each side of the image before OCR. Can help with noisy borders that can provoke hallucinations. 0 means no cropping, 50 means crop half of the image from each side, 0.2 .. 0.5 recommended value."
+        ),
+    crop_left: float = Query(
+        default=0.0,
+        ge=0.0,
+        le=99.0,
+        description="Optional percent to crop from the LEFT side of the image before OCR. Overrides the 'crop' value for the left side. 0 means no cropping, 50 means crop half of the image width, 0.2 .. 0.5 recommended value."
+        ),
+    crop_right: float = Query(
+        default=0.0,
+        ge=0.0,
+        le=99.0,
+        description="Optional percent to crop from the RIGHT side of the image before OCR. Overrides the 'crop' value for the right side. 0 means no cropping, 50 means crop half of the image width, 0.2 .. 0.5 recommended value."
+        ),
+    crop_top: float = Query(
+        default=0.0,
+        ge=0.0,
+        le=99.0,
+        description="Optional percent to crop from the TOP side of the image before OCR. Overrides the 'crop' value for the top side. 0 means no cropping, 50 means crop half of the image height, 0.2 .. 0.5 recommended value."
+        ),
+    crop_bottom: float = Query(
+        default=0.0,
+        ge=0.0,
+        le=99.0,
+        description="Optional percent to crop from the BOTTOM side of the image before OCR. Overrides the 'crop' value for the bottom side. 0 means no cropping, 50 means crop half of the image height, 0.2 .. 0.5 recommended value."
+        ),
+    ):
+    """Page metadata extraction only.
+
+    Detects and OCRs the page metadata regions (stamps, upper-right and
+    bottom-right corners) without running the full layout/text/table
+    recognition pipeline. Faster than ``/ocr/block/`` when only the page
+    metadata is needed.
+    """
+    try:
+        crown_logger.info(
+            f"Received file: {file.filename}, content_type: {file.content_type}"
+        )
+        if 100.0 - crop_left - crop_right < 1.0 or 100.0 - crop_top - crop_bottom < 1.0:
+            raise HTTPException(
+                status_code=400,
+                detail="Inconsistent crop values",
+            )
+        backend_host = get_backend_host(inference_manager)
+        _, last_updated, port = get_request_count()
+        if (
+            last_updated is None
+            or port is None
+            or not probe_health(f"http://{backend_host}:{port}")
+        ):
+            inference_manager.stop()
+        inference_manager.start()
+        async with inference_manager.booking():
+            update_request_count()
+            try:
+                start_time = perf_counter()
+                image = await load_and_preprocess_image_async(
+                    file,
+                    dpi=dpi,
+                    trim=trim,
+                    crop=crop,
+                    crop_left=crop_left,
+                    crop_right=crop_right,
+                    crop_top=crop_top,
+                    crop_bottom=crop_bottom,
+                )
+                metadata_interior, page_content, upper_right, bottom_right, frames_dict = await asyncio.to_thread(split_frames, image)
+                page_metadata = {}
+                if metadata_interior:
+                    if crown_settings.DEBUG_FOLDER:
+                        os.makedirs(crown_settings.DEBUG_FOLDER, exist_ok=True)
+                        metadata_interior.save(f"{crown_settings.DEBUG_FOLDER}/metadata_interior.png")
+                    stamp_ocr_result = await stamp_ocr(metadata_interior)
+                    page_metadata["stamp"] = stamp_ocr_result
+                if upper_right:
+                    if crown_settings.DEBUG_FOLDER:
+                        os.makedirs(crown_settings.DEBUG_FOLDER, exist_ok=True)
+                        upper_right.save(f"{crown_settings.DEBUG_FOLDER}/upper_right.png")
+                    upper_right_ocr_result = await stamp_ocr(upper_right, "upper_right_corner")
+                    page_metadata["upper_right_corner"] = upper_right_ocr_result
+                if bottom_right:
+                    if crown_settings.DEBUG_FOLDER:
+                        os.makedirs(crown_settings.DEBUG_FOLDER, exist_ok=True)
+                        bottom_right.save(f"{crown_settings.DEBUG_FOLDER}/bottom_right.png")
+                    bottom_right_ocr_result = await stamp_ocr(bottom_right, "bottom_right_corner")
+                    page_metadata["bottom_right_corner"] = bottom_right_ocr_result
+                end_time = perf_counter()
+                crown_logger.info(
+                    f"Metadata extraction completed for {file.filename} in {end_time - start_time:.2f} seconds."
+                )
+                if await request.is_disconnected():
+                    crown_logger.warning(f"Client disconnected before metadata response for {file.filename}.")
+                    return {"page_metadata": {}}
+                return {
+                    "page_metadata": page_metadata,
+                }
+            finally:
+                update_request_count(delta=-1)
+    except BatchBusyError as e:
+        crown_logger.warning(f"Batch busy for {file.filename}: {e}")
+        raise HTTPException(
+            status_code=429,
+            detail=str(e),
+            headers={"Retry-After": str(int(max(e.retry_after, 1)))},
+        )
+    except Exception as e:
+        msg = str(e)
+        crown_logger.error(f"Metadata extraction failed for {file.filename}: {msg}")
+        raise HTTPException(
+            status_code=500, detail=msg or "An error occurred during metadata extraction."
         )
 
 

@@ -72,6 +72,8 @@ class CrownSettings(BaseSettings):
     DEBUG_FOLDER: Optional[str] = None
     OLLAMA_SURYA_MODEL: Optional[str] = None
     OLLAMA_GLM_MODEL: Optional[str] = None
+    TRIM_LARGE_IMAGES_LEFT_SIDE: bool = True
+    LARGE_IMAGES_HOR_THRESHOLD: int = 12000
 
     class Config:
         env_file = find_dotenv("local.env")

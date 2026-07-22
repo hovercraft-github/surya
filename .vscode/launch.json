@@ -73,6 +73,7 @@
                 "OLLAMA_URL_LAYOUT": "http://localhost:11434",
                 // "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ"
                 "OLLAMA_SURYA_MODEL": "surya-ocr-2-65535",
+                // "OLLAMA_SURYA_MODEL": "surya2-ocr-64k",
                 "OLLAMA_GLM_MODEL": "glm-ocr-64k",
                 // "OLLAMA_SURYA_MODEL": "surya2-ocr-64k",
                 // "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ/пример3/"
