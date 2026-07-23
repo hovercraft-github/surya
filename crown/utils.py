@@ -3,6 +3,7 @@ import os
 import numpy as np
 
 
+from crown.settings import crown_settings
 from surya.settings import settings
 
 from bs4 import BeautifulSoup
@@ -497,3 +498,50 @@ def merge_html_blocks(
             html = f"""<div id="block-{_idx}" data-bbox="{_bbox[0]}, {_bbox[1]}, {_bbox[2]}, {_bbox[3]}">{html}</div>"""
             parts.append(html)
     return "\n".join(parts)
+
+
+def load_and_preprocess_image(
+    file: UploadFile,
+    dpi: int | None,
+    trim: float = 0.5,
+    crop: float = 0.0,
+    crop_left: float = 0.0,
+    crop_right: float = 0.0,
+    crop_top: float = 0.0,
+    crop_bottom: float = 0.0,
+) -> Image.Image:
+    """Load an uploaded file (PDF or image) into a PIL image and apply the
+    shared trim/crop preprocessing used by every OCR endpoint.
+
+    - PDF inputs are rendered at the given DPI to a single RGB image.
+    - Image inputs are decoded and converted to RGB.
+    - ``trim`` removes empty/solid borders by entropy threshold.
+    - ``crop_*`` crop a percentage off the corresponding side before OCR;
+      when any of the per-side values is non-zero, it is used; otherwise
+      the symmetric ``crop`` value is applied to all four sides.
+    """
+    if file.content_type == "application/pdf":
+        image = get_page_image(file, page_num=1, dpi=dpi or 300)
+    else:
+        image = Image.open(file.file).convert("RGB")
+    if trim > 0.0:
+        image = trim_empty_background(image, threshold=trim)
+    if crop_left or crop_right or crop_top or crop_bottom:
+        image = crop_by_side_percent(
+            image,
+            left=crop_left or crop,
+            right=crop_right or crop,
+            top=crop_top or crop,
+            bottom=crop_bottom or crop,
+        )
+    elif crop > 0.0:
+        image = crop_by_percent(image, crop)
+    w = image.width
+    h = image.height
+    if w > crown_settings.LARGE_IMAGES_HOR_THRESHOLD and crown_settings.TRIM_LARGE_IMAGES_LEFT_SIDE:
+        percent = (1 - h/w) * 100
+        image = crop_by_side_percent(image, left=percent, right=0.0, top=0.0, bottom=0.0)
+    if crown_settings.DEBUG_FOLDER:
+        os.makedirs(crown_settings.DEBUG_FOLDER, exist_ok=True)
+        image.save(f"{crown_settings.DEBUG_FOLDER}/debug_preprocessed.png")
+    return image
