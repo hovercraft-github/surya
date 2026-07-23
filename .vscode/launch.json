@@ -77,7 +77,9 @@
                 "OLLAMA_GLM_MODEL": "glm-ocr-64k",
                 // "OLLAMA_SURYA_MODEL": "surya2-ocr-64k",
                 // "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ/пример3/"
-                "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ/Пример2"
+                // "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ/Пример2"
+                // "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ/dd"
+                "DEBUG_FOLDER": "/home/al/prj/ITSumma/NPZ/Пример6/debug"
             },
         },
         {

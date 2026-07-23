@@ -566,7 +566,8 @@ class CrownSuryaInferenceManager(SuryaInferenceManager):
                 return
             if not hasattr(self, "backend"):
                 self.backend = _build_backend(self.method)
-            super().start()
+            if self.method in ["vllm", "llamacpp"]:
+                super().start()
             self._ensure_batcher_thread()
 
     def stop(self) -> None:
