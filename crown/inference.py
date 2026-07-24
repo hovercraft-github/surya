@@ -568,6 +568,9 @@ class CrownSuryaInferenceManager(SuryaInferenceManager):
                 self.backend = _build_backend(self.method)
             if self.method in ["vllm", "llamacpp"]:
                 super().start()
+            else:
+                settings.SURYA_INFERENCE_URL = crown_settings.OLLAMA_URL_LAYOUT
+                settings.SURYA_INFERENCE_AUTOSTART = False
             self._ensure_batcher_thread()
 
     def stop(self) -> None:

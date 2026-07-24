@@ -11,7 +11,8 @@ from bs4 import BeautifulSoup
 
 import pypdfium2
 from PIL import Image, ImageDraw
-from fastapi import UploadFile
+# from fastapi import UploadFile
+from starlette.datastructures import UploadFile
 from concurrent.futures import ProcessPoolExecutor
 
 
@@ -22,11 +23,14 @@ def get_bg_color(image: Image.Image) -> int|tuple[int, int, int]:
     return bg_color
 
 def get_page_image(
-    pdf_file: UploadFile, page_num: int, dpi: int | None = None
+    pdf_file: UploadFile | str, page_num: int, dpi: int | None = None
 ) -> Image.Image:
     if dpi is None:
         dpi = settings.IMAGE_DPI_HIGHRES
-    doc = pypdfium2.PdfDocument(pdf_file.file.read())
+    if isinstance(pdf_file, UploadFile):
+        doc = pypdfium2.PdfDocument(pdf_file.file.read())
+    else:
+        doc = pypdfium2.PdfDocument(pdf_file)
     renderred = doc.render(
         pypdfium2.PdfBitmap.to_pil,
         page_indices=[page_num - 1],
@@ -501,8 +505,8 @@ def merge_html_blocks(
 
 
 def load_and_preprocess_image(
-    file: UploadFile,
-    dpi: int | None,
+    file: UploadFile | str,
+    dpi: int | None = None,
     trim: float = 0.5,
     crop: float = 0.0,
     crop_left: float = 0.0,
@@ -520,10 +524,16 @@ def load_and_preprocess_image(
       when any of the per-side values is non-zero, it is used; otherwise
       the symmetric ``crop`` value is applied to all four sides.
     """
-    if file.content_type == "application/pdf":
-        image = get_page_image(file, page_num=1, dpi=dpi or 300)
+    if isinstance(file, UploadFile):
+        if file.content_type == "application/pdf":
+            image = get_page_image(file, page_num=1, dpi=dpi or 300)
+        else:
+            image = Image.open(file.file).convert("RGB")
     else:
-        image = Image.open(file.file).convert("RGB")
+        if file.lower().endswith(".pdf"):
+            image = get_page_image(file, page_num=1, dpi=dpi or 300)
+        else:
+            image = Image.open(file).convert("RGB")
     if trim > 0.0:
         image = trim_empty_background(image, threshold=trim)
     if crop_left or crop_right or crop_top or crop_bottom:

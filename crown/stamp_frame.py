@@ -1147,6 +1147,10 @@ def find_stamp_frames(
         if invert_before_hough:
             inverted = cv.bitwise_not(hough_src)
             hough_src = inverted
+        cv.threshold(hough_src, 128, 255, cv.THRESH_TOZERO, hough_src)
+        if crown_settings.DEBUG_FOLDER:
+            os.makedirs(crown_settings.DEBUG_FOLDER, exist_ok=True)
+            cv.imwrite(f"{crown_settings.DEBUG_FOLDER}/hough_src.png", hough_src)
         lines_p = cv.HoughLinesP(
             hough_src,
             rho,
@@ -1207,8 +1211,8 @@ def find_stamp_frames(
     indexed_lines: dict[int, list[int]] = (
         dict(enumerate(lines)) if lines else {}
     )
-    if not indexed_lines:
-        return [], corner_tolerance, deskewed, skew_angle, None, None, None, None
+    if not indexed_lines or len(indexed_lines) > 10000:
+        return [], corner_tolerance, rgb, skew_angle, None, None, None, None
 
     outer_lines = {
         ix: seg

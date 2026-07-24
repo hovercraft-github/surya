@@ -100,7 +100,7 @@ logging.config.dictConfig(LOGGING_CONFIG)
 backend_type = settings.SURYA_INFERENCE_BACKEND or "vllm"
 LOCK_FILE = _cache_dir() / "surya-api_server.lock"
 LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-inference_manager = CrownSuryaInferenceManager()
+inference_manager = CrownSuryaInferenceManager(method=backend_type)
 
 
 
@@ -177,6 +177,8 @@ async def resource_management_loop():
         timer = 60.0
         while True:
             await asyncio.sleep(timer)
+            if inference_manager.method == "ollama":
+                continue
             cnt, last_updated, _ = get_request_count()
             if (
                 cnt == 0
@@ -324,7 +326,7 @@ async def ocr_full_page(request: Request, file: UploadFile = File(...),
         if (
             last_updated is None
             or port is None
-            or not probe_health(f"http://{backend_host}:{port}")
+            or (inference_manager.method and inference_manager.method.lower() != "ollama" and not probe_health(f"http://{backend_host}:{port}"))
         ):
             inference_manager.stop()
         inference_manager.start()
@@ -565,7 +567,7 @@ async def ocr_blocks(request: Request, file: UploadFile = File(...),
         if (
             last_updated is None
             or port is None
-            or not probe_health(f"http://{backend_host}:{port}")
+            or (inference_manager.method and inference_manager.method.lower() != "ollama" and not probe_health(f"http://{backend_host}:{port}"))
         ):
             inference_manager.stop()
         inference_manager.start()
@@ -748,7 +750,7 @@ async def ocr_metadata(request: Request, file: UploadFile = File(...),
         if (
             last_updated is None
             or port is None
-            or not probe_health(f"http://{backend_host}:{port}")
+            or (inference_manager.method and inference_manager.method.lower() != "ollama" and not probe_health(f"http://{backend_host}:{port}"))
         ):
             inference_manager.stop()
         inference_manager.start()

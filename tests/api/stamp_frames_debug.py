@@ -32,7 +32,8 @@ from PIL import Image
 # Make the project root importable when run as a plain script.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from crown.stamp_frame import find_stamp_frames, split_frames  # noqa: E402
+from crown.stamp_frame import find_stamp_frames, split_frames
+from crown.utils import load_and_preprocess_image
 
 
 def _pick_image_file() -> str | None:
@@ -137,21 +138,23 @@ def main(argv):
     show_main_frames = args.show_main_frames
 
     try:
-        src_pil = Image.open(image_path)
+        # src_pil = Image.open(image_path)
+        src_pil = load_and_preprocess_image(image_path)
     except (FileNotFoundError, OSError) as exc:
         print(f"Error opening image: {exc}")
         print("Usage: stamp_frames_debug.py <image_file> "
               "[--show-original] [--show-indexed-lines] [--show-closed-loops]\n")
         return -1
 
-    with Image.open(image_path) as img:
-        dpi = img.info.get("dpi")
+    dpi = int(src_pil.info.get("dpi", (300, 300))[0])
     print(f"DPI Resolution: {dpi}")
 
     # --- Production pipeline -------------------------------------------------
-    frames, corner_tolerance, deskewed, skew_angle, closed_loops, main_frames, indexed_lines, origin_point = find_stamp_frames(src_pil,
+    frames, corner_tolerance, deskewed, skew_angle, closed_loops, main_frames, indexed_lines, origin_point = find_stamp_frames(
+                                        src_pil,
+                                        # hough_threshold=50,
                                         max_frames=2,
-                                        # skew_min_angle_deg=2.1
+                                        # skew_min_angle_deg=21
                                         )
     print(f"Detected {len(frames)} stamp frame(s); corner_tolerance={corner_tolerance}")
     for i, frame in enumerate(frames):
